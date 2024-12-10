@@ -10,6 +10,7 @@
 #include <index/blockfilterindex.h>
 #include <index/coinstatsindex.h>
 #include <index/txindex.h>
+#include <index/txtimestampindex.h>
 #include <interfaces/chain.h>
 #include <interfaces/echo.h>
 #include <interfaces/init.h>
@@ -385,6 +386,10 @@ static RPCHelpMan getindexinfo()
 
     if (g_txindex) {
         result.pushKVs(SummaryToJSON(g_txindex->GetSummary(), index_name));
+    }
+
+    if (g_txtimestampindex) {
+        result.pushKVs(SummaryToJSON(g_txtimestampindex->GetSummary(), index_name));
     }
 
     if (g_coin_stats_index) {
