@@ -188,7 +188,6 @@ if(ENABLE_WALLET)
   endif()
 endif()
 
-
 # P2P and RPC server functionality used by `bitcoind` and `bitcoin-qt` executables.
 add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   addrdb.cpp
@@ -263,6 +262,7 @@ add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   pow.cpp
   rest.cpp
   rpc/blockchain.cpp
+  rpc/analytics.cpp
   rpc/fees.cpp
   rpc/mempool.cpp
   rpc/mining.cpp
@@ -287,6 +287,7 @@ add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   $<$<TARGET_EXISTS:bitcoin_wallet>:wallet/init.cpp>
   $<$<NOT:$<TARGET_EXISTS:bitcoin_wallet>>:dummywallet.cpp>
 )
+find_package(Arrow REQUIRED)
 target_link_libraries(bitcoin_node
   PRIVATE
     core_interface
@@ -296,6 +297,7 @@ target_link_libraries(bitcoin_node
     leveldb
     minisketch
     univalue
+    Arrow::arrow_static
     Boost::headers
     libevent::core
     libevent::extra

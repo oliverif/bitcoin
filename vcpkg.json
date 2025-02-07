@@ -6,7 +6,8 @@
     "boost-date-time",
     "boost-multi-index",
     "boost-signals2",
-    "libevent"
+    "libevent",
+    "arrow"
   ],
   "default-features": [
     "qt5",

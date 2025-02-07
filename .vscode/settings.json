@@ -111,6 +111,9 @@
         "xtree": "cpp",
         "xutility": "cpp",
         "*.ipp": "cpp",
-        "xstddef": "cpp"
+        "xstddef": "cpp",
+        "cfenv": "cpp",
+        "cinttypes": "cpp",
+        "csignal": "cpp"
     }
 }
