@@ -73,6 +73,9 @@ if(DEFINED ENV{CFLAGS})
 endif()
 set(CMAKE_EXPORT_COMPILE_COMMANDS OFF)
 add_subdirectory(secp256k1)
+set_target_properties(secp256k1 PROPERTIES
+  EXCLUDE_FROM_ALL TRUE
+)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 string(APPEND CMAKE_C_COMPILE_OBJECT " ${APPEND_CPPFLAGS} ${APPEND_CFLAGS}")
 
@@ -106,6 +109,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   addresstype.cpp
   base58.cpp
   bech32.cpp
+  chain.cpp
   chainparams.cpp
   chainparamsbase.cpp
   coins.cpp
@@ -139,6 +143,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   outputtype.cpp
   policy/feerate.cpp
   policy/policy.cpp
+  pow.cpp
   protocol.cpp
   psbt.cpp
   rpc/external_signer.cpp
@@ -196,7 +201,6 @@ add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   bip324.cpp
   blockencodings.cpp
   blockfilter.cpp
-  chain.cpp
   consensus/tx_verify.cpp
   dbwrapper.cpp
   deploymentstatus.cpp
@@ -259,7 +263,6 @@ add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   policy/rbf.cpp
   policy/settings.cpp
   policy/truc_policy.cpp
-  pow.cpp
   rest.cpp
   rpc/blockchain.cpp
   rpc/analytics.cpp
@@ -299,8 +302,8 @@ target_link_libraries(bitcoin_node
     univalue
     Arrow::arrow_static
     Boost::headers
-    libevent::core
-    libevent::extra
+    $<TARGET_NAME_IF_EXISTS:libevent::core>
+    $<TARGET_NAME_IF_EXISTS:libevent::extra>
     $<TARGET_NAME_IF_EXISTS:libevent::pthreads>
     $<TARGET_NAME_IF_EXISTS:USDT::headers>
 )

@@ -15,7 +15,7 @@ $ FUZZ=process_message build_fuzz/src/test/fuzz/fuzz
 # abort fuzzing using ctrl-c
 ```
 
-One can use `--prefix=libfuzzer-nosan` to do the same without common sanitizers enabled.
+One can use `--preset=libfuzzer-nosan` to do the same without common sanitizers enabled.
 See [further](#run-without-sanitizers-for-increased-throughput) for more information.
 
 There is also a runner script to execute all fuzz targets. Refer to
@@ -100,6 +100,18 @@ INFO: seed corpus: files: 991 min: 1b max: 1858b total: 288291b rss: 150Mb
 #993    INITED cov: 7063 ft: 8236 corp: 25/3821b exec/s: 0 rss: 181Mb
 …
 ```
+
+## Using the MemorySanitizer (MSan)
+
+MSan [requires](https://clang.llvm.org/docs/MemorySanitizer.html#handling-external-code)
+that all linked code be instrumented. The exact steps to achieve this may vary
+but involve compiling `clang` from source, using the built `clang` to compile
+an instrumentalized libc++, then using it to build [Bitcoin Core dependencies
+from source](../depends/README.md) and finally the Bitcoin Core fuzz binary
+itself. One can use the MSan CI job as an example for how to perform these
+steps.
+
+Valgrind is an alternative to MSan that does not require building a custom libc++.
 
 ## Run without sanitizers for increased throughput
 

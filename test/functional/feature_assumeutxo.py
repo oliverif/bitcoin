@@ -38,6 +38,12 @@ from test_framework.wallet import (
     getnewdestination,
     MiniWallet,
 )
+from test_framework.blocktools import (
+    REGTEST_N_BITS,
+    REGTEST_TARGET,
+    nbits_str,
+    target_str,
+)
 
 START_HEIGHT = 199
 SNAPSHOT_BASE_HEIGHT = 299
@@ -165,8 +171,8 @@ class AssumeutxoTest(BitcoinTestFramework):
             with self.nodes[0].assert_debug_log([log_msg]):
                 self.nodes[0].assert_start_raises_init_error(expected_msg=error_msg)
 
-        expected_error_msg = f"Error: A fatal internal error occurred, see debug.log for details: Assumeutxo data not found for the given blockhash '7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a'."
-        error_details = f"Assumeutxo data not found for the given blockhash"
+        expected_error_msg = "Error: A fatal internal error occurred, see debug.log for details: Assumeutxo data not found for the given blockhash '7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a'."
+        error_details = "Assumeutxo data not found for the given blockhash"
         expected_error(log_msg=error_details, error_msg=expected_error_msg)
 
         # resurrect node again
@@ -228,6 +234,12 @@ class AssumeutxoTest(BitcoinTestFramework):
         normal, snapshot = n3.getchainstates()["chainstates"]
         assert_equal(normal['blocks'], START_HEIGHT + 99)
         assert_equal(snapshot['blocks'], SNAPSHOT_BASE_HEIGHT)
+
+        # Both states should have the same nBits and target
+        assert_equal(normal['bits'], nbits_str(REGTEST_N_BITS))
+        assert_equal(normal['bits'], snapshot['bits'])
+        assert_equal(normal['target'], target_str(REGTEST_TARGET))
+        assert_equal(normal['target'], snapshot['target'])
 
         # Now lets sync the nodes and wait for the background validation to finish
         self.connect_nodes(0, 3)
@@ -417,7 +429,7 @@ class AssumeutxoTest(BitcoinTestFramework):
 
         assert_equal(n0.getblockchaininfo()["blocks"], FINAL_HEIGHT)
 
-        self.log.info(f"Check that dumptxoutset works for past block heights")
+        self.log.info("Check that dumptxoutset works for past block heights")
         # rollback defaults to the snapshot base height
         dump_output2 = n0.dumptxoutset('utxos2.dat', "rollback")
         check_dump_output(dump_output2)

@@ -16,6 +16,10 @@ from test_framework.blocktools import (
     get_witness_script,
     NORMAL_GBT_REQUEST_PARAMS,
     TIME_GENESIS_BLOCK,
+    REGTEST_N_BITS,
+    REGTEST_TARGET,
+    nbits_str,
+    target_str,
 )
 from test_framework.messages import (
     BLOCK_HEADER_SIZE,
@@ -56,7 +60,12 @@ def assert_template(node, block, expect, rehash=True):
 
 class MiningTest(BitcoinTestFramework):
     def set_test_params(self):
-        self.num_nodes = 2
+        self.num_nodes = 3
+        self.extra_args = [
+            [],
+            [],
+            ["-fastprune", "-prune=1"]
+        ]
         self.setup_clean_chain = True
         self.supports_cli = False
 
@@ -144,6 +153,8 @@ class MiningTest(BitcoinTestFramework):
         # The template will have an adjusted timestamp, which we then modify
         tmpl = node.getblocktemplate(NORMAL_GBT_REQUEST_PARAMS)
         assert_greater_than_or_equal(tmpl['curtime'], t + MAX_FUTURE_BLOCK_TIME - MAX_TIMEWARP)
+        # mintime and curtime should match
+        assert_equal(tmpl['mintime'], tmpl['curtime'])
 
         block = CBlock()
         block.nVersion = tmpl["version"]
@@ -169,6 +180,21 @@ class MiningTest(BitcoinTestFramework):
         bad_block.solve()
         node.submitheader(hexdata=CBlockHeader(bad_block).serialize().hex())
 
+    def test_pruning(self):
+        self.log.info("Test that submitblock stores previously pruned block")
+        prune_node = self.nodes[2]
+        self.generate(prune_node, 400, sync_fun=self.no_op)
+        pruned_block = prune_node.getblock(prune_node.getblockhash(2), verbosity=0)
+        pruned_height = prune_node.pruneblockchain(400)
+        assert_greater_than_or_equal(pruned_height, 2)
+        pruned_blockhash = prune_node.getblockhash(2)
+
+        assert_raises_rpc_error(-1, 'Block not available (pruned data)', prune_node.getblock, pruned_blockhash)
+
+        result = prune_node.submitblock(pruned_block)
+        assert_equal(result, "inconclusive")
+        assert_equal(prune_node.getblock(pruned_blockhash, verbosity=0), pruned_block)
+
     def run_test(self):
         node = self.nodes[0]
         self.wallet = MiniWallet(node)
@@ -186,7 +212,15 @@ class MiningTest(BitcoinTestFramework):
         assert_equal(mining_info['chain'], self.chain)
         assert 'currentblocktx' not in mining_info
         assert 'currentblockweight' not in mining_info
+        assert_equal(mining_info['bits'], nbits_str(REGTEST_N_BITS))
+        assert_equal(mining_info['target'], target_str(REGTEST_TARGET))
         assert_equal(mining_info['difficulty'], Decimal('4.656542373906925E-10'))
+        assert_equal(mining_info['next'], {
+            'height': 201,
+            'target': target_str(REGTEST_TARGET),
+            'bits': nbits_str(REGTEST_N_BITS),
+            'difficulty': Decimal('4.656542373906925E-10')
+        })
         assert_equal(mining_info['networkhashps'], Decimal('0.003333333333333334'))
         assert_equal(mining_info['pooledtx'], 0)
 
@@ -240,9 +274,19 @@ class MiningTest(BitcoinTestFramework):
         bad_block.vtx[0].rehash()
         assert_template(node, bad_block, 'bad-cb-missing')
 
-        self.log.info("submitblock: Test invalid coinbase transaction")
-        assert_raises_rpc_error(-22, "Block does not start with a coinbase", node.submitblock, CBlock().serialize().hex())
-        assert_raises_rpc_error(-22, "Block does not start with a coinbase", node.submitblock, bad_block.serialize().hex())
+        self.log.info("submitblock: Test bad input hash for coinbase transaction")
+        bad_block.solve()
+        assert_equal("bad-cb-missing", node.submitblock(hexdata=bad_block.serialize().hex()))
+
+        self.log.info("submitblock: Test block with no transactions")
+        no_tx_block = copy.deepcopy(block)
+        no_tx_block.vtx.clear()
+        no_tx_block.hashMerkleRoot = 0
+        no_tx_block.solve()
+        assert_equal("bad-blk-length", node.submitblock(hexdata=no_tx_block.serialize().hex()))
+
+        self.log.info("submitblock: Test empty block")
+        assert_equal('high-hash', node.submitblock(hexdata=CBlock().serialize().hex()))
 
         self.log.info("getblocktemplate: Test truncated final transaction")
         assert_raises_rpc_error(-22, "Block decode failed", node.getblocktemplate, {
@@ -377,6 +421,7 @@ class MiningTest(BitcoinTestFramework):
 
         self.test_blockmintxfee_parameter()
         self.test_timewarp()
+        self.test_pruning()
 
 
 if __name__ == '__main__':
