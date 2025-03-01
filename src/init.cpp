@@ -1635,7 +1635,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         LogInfo("* Using %.1f MiB for transaction index database", index_cache_sizes.tx_index * (1.0 / 1024 / 1024));
     }
     if (args.GetBoolArg("-txtimestampindex", DEFAULT_TXTIMESTAMPINDEX)) {
-        LogPrintf("* Using %.1f MiB for transaction timestamp index database\n", cache_sizes.txtimestamp_index * (1.0 / 1024 / 1024));
+        LogPrintf("* Using %.1f MiB for transaction timestamp index database\n", index_cache_sizes.txtimestamp_index * (1.0 / 1024 / 1024));
     }
     for (BlockFilterType filter_type : g_enabled_filter_types) {
         LogInfo("* Using %.1f MiB for %s block filter index database",
@@ -1714,7 +1714,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     }
 
     if (args.GetBoolArg("-txtimestampindex", DEFAULT_TXTIMESTAMPINDEX)) {
-        g_txtimestampindex = std::make_unique<TxTimestampIndex>(interfaces::MakeChain(node), cache_sizes.txtimestamp_index, false, do_reindex);
+        g_txtimestampindex = std::make_unique<TxTimestampIndex>(interfaces::MakeChain(node), index_cache_sizes.txtimestamp_index, false, do_reindex);
         node.indexes.emplace_back(g_txtimestampindex.get());
     }
 
