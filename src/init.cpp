@@ -9,6 +9,7 @@
 
 #include <kernel/checks.h>
 
+#include <analytics/asopr.h>
 #include <addrman.h>
 #include <banman.h>
 #include <blockfilter.h>
@@ -1721,6 +1722,16 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     // Init indexes
     for (auto index : node.indexes) if (!index->Init()) return false;
 
+    // ********************************************************* Step 8.5: start analytics
+    //Init analytics here
+    if (args.GetBoolArg("-asopr", DEFAULT_ASOPR)) {
+        g_asopr = std::make_unique<Asopr>(interfaces::MakeChain(node), index_cache_sizes.tx_index, false, do_reindex);
+        node.analytics.emplace_back(g_asopr.get());
+    }
+
+    // Init analytics
+    for (auto analytic : node.analytics) if (!analytic->Init()) return false;
+
     // ********************************************************* Step 9: load wallet
     for (const auto& client : node.chain_clients) {
         if (!client->load()) {
@@ -1818,6 +1829,14 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             chainman.GetNotifications().fatalError(err_str);
             return;
         }
+
+        // Start analytics initial sync
+        if (!StartAnalyticsBackgroundSync(node)) {
+            bilingual_str err_str = _("Failed to start indexes, shutting down..");
+            chainman.GetNotifications().fatalError(err_str);
+            return;
+        }
+
         // Load mempool from disk
         if (auto* pool{chainman.ActiveChainstate().GetMempool()}) {
             LoadMempool(*pool, ShouldPersistMempool(args) ? MempoolPath(args) : fs::path{}, chainman.ActiveChainstate(), {});
@@ -2094,5 +2113,50 @@ bool StartIndexBackgroundSync(NodeContext& node)
 
     // Start threads
     for (auto index : node.indexes) if (!index->StartBackgroundSync()) return false;
+
+    return true;
+}
+
+bool StartAnalyticsBackgroundSync(NodeContext& node)
+{
+    // Find the oldest block among all indexes.
+    // This block is used to verify that we have the required blocks' data stored on disk,
+    // starting from that point up to the current tip.
+    // analytics_start_block='nullptr' means "start from height 0".
+    std::optional<const CBlockIndex*> analytics_start_block;
+    std::string older_analytic_name;
+    ChainstateManager& chainman = *Assert(node.chainman);
+    const Chainstate& chainstate = WITH_LOCK(::cs_main, return chainman.GetChainstateForIndexing());
+    const CChain& index_chain = chainstate.m_chain;
+
+    for (auto analytic : node.analytics) {
+        const AnalyticSummary& summary = analytic->GetSummary();
+        if (summary.synced) continue;
+
+        // Get the last common block between the index best block and the active chain
+        LOCK(::cs_main);
+        const CBlockIndex* pindex = chainman.m_blockman.LookupBlockIndex(summary.best_block_hash);
+        if (!index_chain.Contains(pindex)) {
+            pindex = index_chain.FindFork(pindex);
+        }
+
+        if (!analytics_start_block || !pindex || pindex->nHeight < analytics_start_block.value()->nHeight) {
+            analytics_start_block = pindex;
+            older_analytic_name = summary.name;
+            if (!pindex) break; // Starting from genesis so no need to look for earlier block.
+        }
+    };
+
+    // Verify all blocks needed to sync to current tip are present.
+    if (analytics_start_block) {
+        LOCK(::cs_main);
+        const CBlockIndex* start_block = *analytics_start_block;
+        if (!start_block) start_block = chainman.ActiveChain().Genesis();
+        if (!chainman.m_blockman.CheckBlockDataAvailability(*index_chain.Tip(), *Assert(start_block))) {
+            return InitError(Untranslated(strprintf("%s best block of the index goes beyond pruned data. Please disable the analytics or recalculate (which will download the whole blockchain again)", older_analytic_name)));
+        }
+    }
+    // Start analytics threads
+    for (auto analytic : node.analytics) if (!analytic->StartBackgroundSync()) return false;
     return true;
 }

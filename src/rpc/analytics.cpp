@@ -19,6 +19,7 @@
 #include <arrow/array.h>
 #include <arrow/type.h>
 #include <fstream>
+#include <chrono>
 
 
 
@@ -42,7 +43,7 @@ std::optional<double> GetBTCPrice(const std::unordered_map<int64_t, double>& btc
     return std::nullopt;  // Indicate that no price was found
 }
 
-double CalculateASOPR(CBlock& block, CBlockUndo& blockUndo, const std::unordered_map<int64_t, double>& btc_price_map, std::ofstream& log_stream) {
+double CalculateASOPR(CBlock& block, CBlockUndo& blockUndo, const std::unordered_map<int64_t, double>& btc_price_map, std::ofstream& log_stream, std::ofstream& perf_stream) {
     double total_transaction_btc = 0;
     double total_created_usd = 0;
     uint64_t blocktime = block.GetBlockTime();
@@ -57,10 +58,6 @@ double CalculateASOPR(CBlock& block, CBlockUndo& blockUndo, const std::unordered
             // -1 as blockundo does not have coinbase tx
             undoTX = &blockUndo.vtxundo.at(it - block.vtx.begin() - 1);
         }
-
-        uint64_t tx_input_value = 0;
-        uint64_t tx_output_value = 0;
-
         // Calculate total input value for the transaction
         for (unsigned int i = 0; i < tx->vin.size(); i++) {
             const CTxIn& txin = tx->vin[i];
@@ -75,9 +72,6 @@ double CalculateASOPR(CBlock& block, CBlockUndo& blockUndo, const std::unordered
             const CTxOut& prev_txout = prev_coin.out;
             double btc_val = ValueFromAmount(prev_txout.nValue).get_real();
             total_transaction_btc += btc_val;
-      
-            // Put in timestamp in getprice function. Function must be made tho. Need to lookup in prices table with the timestamp of the tx.vin timestamp. I can do this by looking up timestamp of txin.prevout.hash.GetHex()
-            // I need to add table as input to this whole function, and further pass it into GetUSDPrice, so that I can extract price at timestamp
             auto price = GetBTCPrice(btc_price_map,vin_timestamp,log_stream);
             if (price){
                 total_created_usd += btc_val * *price;
@@ -85,7 +79,11 @@ double CalculateASOPR(CBlock& block, CBlockUndo& blockUndo, const std::unordered
             
         }
     }
+    auto start = std::chrono::high_resolution_clock::now();
     auto block_price = GetBTCPrice(btc_price_map,blocktime,log_stream);
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> duration = end - start;
+    perf_stream << "Timing of GetPrice: " << duration.count() <<"\n";
 
     // Avoid division by zero
     if (total_created_usd == 0 || !block_price) {
@@ -290,7 +288,7 @@ static RPCHelpMan getblockanalytics()
                      }
                 },
                 RPCExamples{
-                    HelpExampleCli("getblockanalytics", "\"00000000c937983704a73af28acdec37b049d214adbda81d7e2a3dd146f6ed09\"")
+                    HelpExampleCli("getblockanalytics", "\"0000000000000000000076918decb6ddd61319731ffedbe6f92c7af75d55152d\"")
                 },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
@@ -322,8 +320,18 @@ static RPCHelpMan getblockanalytics()
     auto btc_price_map = LoadBTCPrices(csv_file_path);
 
     std::ofstream log_stream("D:/Code/bitcoin/error_log.txt", std::ios::app);
+    std::ofstream perf_stream("D:/Code/bitcoin/performance_log.txt", std::ios::app);
+    auto start = std::chrono::high_resolution_clock::now();
+    auto asopr = CalculateASOPR(block,blockUndo, btc_price_map,log_stream,perf_stream);
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> duration = end - start;
 
-    auto asopr = CalculateASOPR(block,blockUndo, btc_price_map,log_stream);
+    
+    if (perf_stream.is_open()) {
+        perf_stream << "Timing of ASOPR: " << duration.count() <<"\n";  // Append missing timestamp
+    } else {
+        std::cerr << "Error: log file is not open." << std::endl;
+    }
 
     return asopr;
 },
