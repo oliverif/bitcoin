@@ -1,0 +1,26 @@
+# Build subdirectories.
+/*build*
+!/build-aux
+!/build_msvc
+/out
+/.vs
+
+*.pyc
+*.db
+*.sqlite
+# Only ignore unexpected patches
+*.patch
+!contrib/guix/patches/*.patch
+!depends/patches/**/*.patch
+
+/CMakeUserPresets.json
+
+# Previous releases
+/releases
+
+#build tests
+test/lint/test_runner/target/
+
+/guix-build-*
+
+/ci/scratch/
