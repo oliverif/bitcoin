@@ -5,6 +5,7 @@
 #ifndef BITCOIN_ANALYTICS_BASE_H
 #define BITCOIN_ANALYTICS_BASE_H
 
+#include <analytics/storageutils.h>
 #include <dbwrapper.h>
 #include <interfaces/chain.h>
 #include <interfaces/types.h>
@@ -12,6 +13,8 @@
 #include <util/threadinterrupt.h>
 #include <validationinterface.h>
 #include <sqlite3.h>
+#include <common/args.h>
+
 
 #include <string>
 
@@ -23,18 +26,14 @@ namespace interfaces {
 class Chain;
 } // namespace interfaces
 
+using AnalyticsRow = std::pair<uint64_t, std::vector<std::variant<int64_t, double>>>;
+using AnalyticsBatch = std::vector<AnalyticsRow>;
+
 struct AnalyticSummary {
     std::string name;
     bool synced{false};
     int best_block_height{0};
     uint256 best_block_hash;
-};
-
-struct AnalyticStorageConfig {
-    std::string analytic_id;
-    std::string db_name;
-    std::string table_name;
-    std::vector<std::string> columns;
 };
 
 /**
@@ -60,18 +59,10 @@ protected:
     class DB
     {
     private:
-        sqlite3* m_db;
-        const fs::path& m_db_path;
-        std::string column_name;
-        
-
-        bool ColumnsExist();
-        bool TableExists();
-        void CreateAnalyticsTable(const std::string& column_name);
-        void AddColumn(const std::string& column_name);
-        
+        StorageUtils::AnalyticStorageConfig storageConfig;
+               
     public:
-        DB(const fs::path& path);
+        DB(StorageUtils::AnalyticStorageConfig config);
 
         /// Read block locator of the chain that the index is in sync with.
         bool ReadBestBlock(CBlockLocator& locator) const;
@@ -79,11 +70,11 @@ protected:
         /// Write block locator of the chain that the index is in sync with.
         void WriteBestBlock(const CBlockLocator& locator);
 
-        bool WriteAnalytics(const std::pair<uint64_t, std::vector<double>>& analytics);
+        bool ReadAnalytics(AnalyticsRow& analytics, std::vector<StorageUtils::ColumnSpec> columns, uint64_t height) const;
+        bool ReadAnalytics(AnalyticsBatch& analytics, std::vector<StorageUtils::ColumnSpec> columns, std::vector<uint64_t> heights) const;
 
-        bool ValidateDbConfig();
-
-        virtual AnalyticStorageConfig getStorageConfig() const = 0;
+        bool WriteAnalytics(const AnalyticsRow& analytics);
+        bool WriteAnalytics(const AnalyticsBatch& analytics);
 
         ~DB();
     };

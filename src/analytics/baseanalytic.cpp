@@ -19,6 +19,7 @@
 #include <util/translation.h>
 #include <validation.h> // For g_chainman
 
+
 #include <string>
 #include <utility>
 
@@ -42,122 +43,15 @@ CBlockLocator BaseAnalytic::GetLocator(interfaces::Chain& chain, const uint256& 
     return locator;
 }
 
-BaseAnalytic::DB::DB(const fs::path& path) : m_db_path(path)
-{}
-
-
-bool BaseAnalytic::DB::ValidateDbConfig() {
-
-    //Check that db path exists
-    if (!std::filesystem::exists(m_db_path.parent_path())) {
-        throw std::runtime_error("Db path doesn't exist:" + m_db_path.parent_path().string());
-        // std::filesystem::create_directories(m_db_path.parent_path()); // Create the directory if it doesn't exist
-    }
-    if (!std::filesystem::exists(m_db_path)) {
-        throw std::runtime_error("Db file doesn't exist:" + m_db_path.generic_string());
-        // std::filesystem::create_directories(m_db_path.parent_path()); // Create the directory if it doesn't exist
-    }
-
-    //Check that table and columns exist
-    auto config = getStorageConfig();
-    if (sqlite3_open_v2(m_db_path.utf8string().c_str(), &m_db, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK) {
-        std::string error_msg = "Can't open database: " + std::string(sqlite3_errmsg(m_db));
-        sqlite3_close(m_db); // Ensure the database is closed if open failed
-        throw std::runtime_error(error_msg);
-    }
-
-    if (!TableExists()) {
-        return false;
-    }
-    if (!ColumnsExist()) {
-        return false;
-    }
-    return true;
-}
-bool BaseAnalytic::DB::TableExists()
+BaseAnalytic::DB::DB(StorageUtils::AnalyticStorageConfig config) : storageConfig(std::move(config))
 {
-    auto config = getStorageConfig();
-    const char* check_table_sql = "SELECT name FROM sqlite_master WHERE type='table' AND name=?;";
-    sqlite3_stmt* stmt;
-    if (sqlite3_prepare_v2(m_db, check_table_sql, -1, &stmt, nullptr) == SQLITE_OK) {
-        sqlite3_bind_text(stmt, 1, config.table_name.c_str(), -1, SQLITE_TRANSIENT);
-        if (sqlite3_step(stmt) == SQLITE_ROW) {
-            sqlite3_finalize(stmt);
-            return true;
-        }
-        sqlite3_finalize(stmt);
-        LogError("Table %s does not exist\n", config.table_name);
-        return false;
-    }
-    LogError("Failed to prepare table check: %s", sqlite3_errmsg(m_db));
-    
-    return false;
-}
-
-
-bool BaseAnalytic::DB::ColumnsExist() {
-    auto config = getStorageConfig();
-
-    std::string query = "PRAGMA table_info(" + config.table_name + ");";
-    sqlite3_stmt* stmt;
-    if (sqlite3_prepare_v2(m_db, query.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
-        std::cerr << "Failed to prepare statement: " << sqlite3_errmsg(m_db) << std::endl;
-        return false;
-    }
-
-    std::set<std::string> found_columns;
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
-        const char* name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1)); // column 1 is "name"
-        if (name) {
-            found_columns.insert(name);
-        }
-    }
-    sqlite3_finalize(stmt);
-
-    // 3. Verify all expected columns are found
-    for (const auto& col : config.columns) {
-        if (found_columns.find(col) == found_columns.end()) {
-            LogError("Column %s does not exist in table %s\n", col,config.table_name);
-            return false; // at least one expected column not found
-        }
-    }
-    return true; // Column does not exist
-}
-
-void BaseAnalytic::DB::AddColumn(const std::string& column_name) {
-    std::string alter_sql = "ALTER TABLE analytics ADD COLUMN " + column_name + " REAL;";
-    char* err_msg = nullptr;
-    if (sqlite3_exec(m_db, alter_sql.c_str(), nullptr, nullptr, &err_msg) != SQLITE_OK) {
-        std::cerr << "SQL error: " << err_msg << std::endl;
-        sqlite3_free(err_msg);
-    }
-}
-
-// Create the analytics table with the specified column
-void BaseAnalytic::DB::CreateAnalyticsTable(const std::string& column_name) {
-    // Combined SQL string to create both tables
-    std::string create_tables_sql = R"(
-        CREATE TABLE analytics (
-            timestamp INTEGER PRIMARY KEY,
-            )" + column_name + R"( REAL
-        );
-        CREATE TABLE IF NOT EXISTS sync_points (
-            analytic_id TEXT PRIMARY KEY,
-            locator BLOB
-        );
-    )";
-
-    char* err_msg = nullptr;
-    if (sqlite3_exec(m_db, create_tables_sql.c_str(), nullptr, nullptr, &err_msg) != SQLITE_OK) {
-        std::cerr << "SQL error (creating tables): " << err_msg << std::endl;
-        sqlite3_free(err_msg);
-    }
+    auto res = StorageUtils::ValidateConfig(storageConfig, true);
 }
 
 BaseAnalytic::DB::~DB() {
-    if (m_db) {
-        sqlite3_close(m_db);
-        m_db = nullptr;
+    if (storageConfig.sqlite_db) {
+        sqlite3_close(storageConfig.sqlite_db);
+        storageConfig.sqlite_db = nullptr;
     }
 
 }
@@ -166,11 +60,11 @@ bool BaseAnalytic::DB::ReadBestBlock(CBlockLocator& locator) const
 {
     const char* sql = "SELECT locator FROM sync_points WHERE analytic_id = ?;";
     sqlite3_stmt* stmt;
-    if (sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
-        std::cerr << "Failed to prepare statement: " << sqlite3_errmsg(m_db) << std::endl;
+    if (sqlite3_prepare_v2(storageConfig.sqlite_db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        std::cerr << "Failed to prepare statement: " << sqlite3_errmsg(storageConfig.sqlite_db) << std::endl;
         return false;
     }
-    sqlite3_bind_text(stmt, 1, column_name.c_str(), -1, SQLITE_TRANSIENT); // Use GetAnalyticId() directly
+    sqlite3_bind_text(stmt, 1, storageConfig.analytic_id.c_str(), -1, SQLITE_TRANSIENT); // Use GetAnalyticId() directly
     if (sqlite3_step(stmt) == SQLITE_ROW) {
         const void* blob = sqlite3_column_blob(stmt, 0);
         int blob_size = sqlite3_column_bytes(stmt, 0);
@@ -190,6 +84,8 @@ bool BaseAnalytic::DB::ReadBestBlock(CBlockLocator& locator) const
     return false;
 }
 
+
+
 void BaseAnalytic::DB::WriteBestBlock(const CBlockLocator& locator)
 {
     // Serialize the CBlockLocator into a binary format
@@ -201,14 +97,14 @@ void BaseAnalytic::DB::WriteBestBlock(const CBlockLocator& locator)
 
     const char* sql = "INSERT OR REPLACE INTO sync_points (analytic_id, locator) VALUES (?, ?);";
     sqlite3_stmt* stmt;
-    if (sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
-        std::cerr << "Failed to prepare statement: " << sqlite3_errmsg(m_db) << std::endl;
+    if (sqlite3_prepare_v2(storageConfig.sqlite_db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        std::cerr << "Failed to prepare statement: " << sqlite3_errmsg(storageConfig.sqlite_db) << std::endl;
         return;
     }
-    sqlite3_bind_text(stmt, 1, column_name.c_str(), -1, SQLITE_TRANSIENT); // Use GetAnalyticId() directly
+    sqlite3_bind_text(stmt, 1, storageConfig.analytic_id.c_str(), -1, SQLITE_TRANSIENT); // Use GetAnalyticId() directly
     sqlite3_bind_blob(stmt, 2, locator_blob.data(), locator_blob.size(), SQLITE_TRANSIENT);
     if (sqlite3_step(stmt) != SQLITE_DONE) {
-        std::cerr << "Failed to execute statement: " << sqlite3_errmsg(m_db) << std::endl;
+        std::cerr << "Failed to execute statement: " << sqlite3_errmsg(storageConfig.sqlite_db) << std::endl;
         sqlite3_finalize(stmt);
         return;
     }
@@ -216,40 +112,148 @@ void BaseAnalytic::DB::WriteBestBlock(const CBlockLocator& locator)
     return;
 }
 
-bool BaseAnalytic::DB::WriteAnalytics(const std::pair<uint64_t, std::vector<double>>& analytics) {
-    // Extract the timestamp and analytics values
-    uint64_t timestamp = analytics.first;
-    const std::vector<double>& values = analytics.second;
+bool BaseAnalytic::DB::ReadAnalytics(AnalyticsRow& analytics, std::vector<StorageUtils::ColumnSpec> columns, uint64_t height) const
+{
+    AnalyticsBatch batch;
+    if (!ReadAnalytics(batch, columns, {height})) {
+        return false;
+    }
+    if (batch.empty()) {
+        return false;
+    }
+    analytics = std::move(batch.at(0));
+    return true;
+}
 
+bool BaseAnalytic::DB::ReadAnalytics(AnalyticsBatch& analytics, std::vector<StorageUtils::ColumnSpec> columns, std::vector<uint64_t> heights) const
+{
+    if (heights.empty() || columns.empty()) {
+        return false;
+    }
 
+    // Build the SQL query
+    std::string sql = "SELECT ";
+    bool first = true;
+    for (const auto& col : columns) {
+        if (!first) sql += ", ";
+        sql += col.name;
+        first = false;
+    }
+    sql += " FROM " + storageConfig.table_name + " WHERE height IN (";
+    for (size_t i = 0; i < heights.size(); ++i) {
+        sql += (i == 0 ? "?" : ",?");
+    }
+    sql += ") ORDER BY height ASC;";
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(storageConfig.sqlite_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+        throw std::runtime_error("Failed to prepare statement: " + std::string(sqlite3_errmsg(storageConfig.sqlite_db)));
+    }
+
+    // Bind height values
+    for (size_t i = 0; i < heights.size(); ++i) {
+        sqlite3_bind_int64(stmt, static_cast<int>(i + 1), static_cast<sqlite3_int64>(heights[i]));
+    }
+
+    // Execute and collect rows
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        AnalyticsRow values;
+        values.first = sqlite3_column_int64(stmt, 0);
+        std::vector<std::variant<int64_t, double>> row_values;
+
+        for (int col = 1; col <= static_cast<int>(columns.size()); ++col) {
+            int type = sqlite3_column_type(stmt, col);
+            if (type == SQLITE_INTEGER) {
+                values.second.emplace_back(static_cast<int64_t>(sqlite3_column_int64(stmt, col)));
+            } else if (type == SQLITE_FLOAT) {
+                values.second.emplace_back(sqlite3_column_double(stmt, col));
+            } else if (type == SQLITE_NULL) {
+                values.second.emplace_back(int64_t(0)); // or std::nullopt if you support that
+            } else {
+                throw std::runtime_error("Unsupported column type in analytics table");
+            }
+        }
+
+        analytics.emplace_back(values);
+    }
+
+    sqlite3_finalize(stmt);
+    return true;
+}
+
+bool BaseAnalytic::DB::WriteAnalytics(const AnalyticsRow& analytics)
+{
+    return WriteAnalytics(AnalyticsBatch{analytics});
+}
+
+bool BaseAnalytic::DB::WriteAnalytics(const AnalyticsBatch& analytics)
+{
+    if (analytics.empty()) return true;
     // Construct the SQL statement
-    std::string sql = "INSERT OR IGNORE INTO analytics (timestamp, " + column_name + ") VALUES (?, ?);";
+    std::string sql = "INSERT INTO " + storageConfig.table_name + " (";
+    bool first = true;
+    for (const auto& col : storageConfig.columns) {
+        if (!first) sql += ", ";
+        sql += col.name;
+        first = false;
+    }
+    sql += ") VALUES (";
+    for (size_t i = 0; i < storageConfig.columns.size(); ++i) {
+        if (i > 0) sql += ", ";
+        sql += "?";
+    }
+    sql += ");";
 
     sqlite3_stmt* stmt;
-    if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
-        std::cerr << "Failed to prepare statement: " << sqlite3_errmsg(m_db) << std::endl;
+    if (sqlite3_prepare_v2(storageConfig.sqlite_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+        std::cerr << "Failed to prepare statement: " << sqlite3_errmsg(storageConfig.sqlite_db) << std::endl;
         return false;
     }
 
-    // Bind the timestamp
-    auto ok1 = sqlite3_bind_int64(stmt, 1, timestamp);
-    auto err = sqlite3_errmsg(m_db);
-
-    // Bind the analytics value (assuming only one value for now)
-    if (!values.empty()) {
-        auto ok2 = sqlite3_bind_double(stmt, 2, values[0]); // Bind the first value
-    } else {
-        sqlite3_bind_null(stmt, 2); // Bind null if no values are provided
-    }
-
-    // Execute the statement
-    if (sqlite3_step(stmt) != SQLITE_DONE) {
-        auto err2 = sqlite3_errmsg(m_db);
-        std::cerr << "Failed to execute statement: " << sqlite3_errmsg(m_db) << std::endl;
+    // Start transaction for batch insert
+    char* errmsg = nullptr;
+    if (sqlite3_exec(storageConfig.sqlite_db, "BEGIN TRANSACTION;", nullptr, nullptr, &errmsg) != SQLITE_OK) {
+        std::cerr << "Failed to begin transaction: " << errmsg << std::endl;
+        sqlite3_free(errmsg);
+        sqlite3_finalize(stmt);
         return false;
     }
 
-    // Finalize the statement
+    for (const auto& row : analytics) {
+        sqlite3_reset(stmt);
+        sqlite3_clear_bindings(stmt);
+
+        if (sqlite3_bind_int64(stmt, 1, row.first) != SQLITE_OK) {
+            std::cerr << "Failed to bind height: " << sqlite3_errmsg(storageConfig.sqlite_db) << std::endl;
+            sqlite3_finalize(stmt);
+            return false;
+        }
+
+        for (int i = 0; i < row.second.size(); ++i) {
+            auto sqlType = storageConfig.columns[i + 1].sqlite_type;
+            auto& val = row.second.at(i);
+            if (!StorageUtils::BindValue(stmt, static_cast<int>(i + 2), sqlType, row.second.at(i))) {
+                auto errmsg = sqlite3_errmsg(storageConfig.sqlite_db);
+                std::cerr << "Failed to bind value at index " << i << ": " << errmsg << std::endl;
+                sqlite3_finalize(stmt);
+                return false;
+            }
+        }
+
+        if (sqlite3_step(stmt) != SQLITE_DONE) {
+            std::cerr << "Failed to execute statement: " << sqlite3_errmsg(storageConfig.sqlite_db) << std::endl;
+            sqlite3_finalize(stmt);
+            return false;
+        }
+    }
+
+    if (sqlite3_exec(storageConfig.sqlite_db, "END TRANSACTION;", nullptr, nullptr, &errmsg) != SQLITE_OK) {
+        std::cerr << "Failed to end transaction: " << errmsg << std::endl;
+        sqlite3_free(errmsg);
+        sqlite3_finalize(stmt);
+        return false;
+    }
+
     sqlite3_finalize(stmt);
     return true;
 }
@@ -272,10 +276,10 @@ static const uint256 GetBlockHashByDate(CChain& chain, const uint64_t& start_tim
     return uint256(); // Return an empty hash if no block is found for the date
 }
 
+
+
 bool BaseAnalytic::Init()
 {
-    if (!GetDB().ValidateDbConfig()) return false;
-
     AssertLockNotHeld(cs_main);
 
     // May need reset if index is being restarted.
@@ -289,10 +293,14 @@ bool BaseAnalytic::Init()
     // callbacks are not missed once m_synced is true.
     m_chain->context()->validation_signals->RegisterValidationInterface(this);
 
-    CBlockLocator locator;
+    /* CBlockLocator locator;
     if (!GetDB().ReadBestBlock(locator)) {
         uint256 start_block_hash = GetBlockHashByDate(m_chainstate->m_chain, start_timestamp);
         locator = GetLocator(*m_chain,start_block_hash);
+    }*/
+    CBlockLocator locator;
+    if (!GetDB().ReadBestBlock(locator)) {
+        locator.SetNull();
     }
 
     LOCK(cs_main);

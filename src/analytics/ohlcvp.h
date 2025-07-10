@@ -24,7 +24,6 @@ protected:
 
 private:
     const std::unique_ptr<DB> m_db;
-    std::unordered_map<int64_t, double> btc_price_map;
     std::ofstream log_stream;
     std::ofstream perf_stream;
 
@@ -34,13 +33,12 @@ private:
     std::chrono::steady_clock::time_point point4;
 
     bool AllowPrune() const override { return false; }
-    std::unordered_map<int64_t, double> LoadBTCPrices(const std::string& file_path);
-    std::optional<double> CalculateOHLCVP(const CBlock& block, const CBlockUndo& blockUndo, const std::unordered_map<int64_t, double>& btc_price_map);
-    std::optional<double> GetBTCPrice(const std::unordered_map<int64_t, double>& btc_price_map, int64_t timestamp, std::ofstream& log_stream);
-    std::unordered_map<int64_t, double> ConvertTableToMap(const std::shared_ptr<arrow::Table>& table);
+    bool LoadCsvToBatch(const std::string& file_path, AnalyticsBatch& out_batch);
+    bool GetKlines(const std::string& symbol);
 
 protected:
     bool CustomAppend(const interfaces::BlockInfo& block) override;
+    bool CustomInit(const std::optional<interfaces::BlockRef>& block) override;
 
     BaseAnalytic::DB& GetDB() const override;
 

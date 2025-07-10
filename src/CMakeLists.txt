@@ -197,6 +197,7 @@ endif()
 add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   analytics/baseanalytic.cpp
   analytics/asopr.cpp
+  analytics/ohlcvp.cpp
   addrdb.cpp
   addrman.cpp
   banman.cpp

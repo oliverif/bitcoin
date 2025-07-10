@@ -9,7 +9,6 @@
 
 #include <kernel/checks.h>
 
-#include <analytics/analyticsmanager.h>
 #include <analytics/asopr.h>
 #include <analytics/ohlcvp.h>
 #include <addrman.h>
@@ -1728,21 +1727,23 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 
     // ********************************************************* Step 8.5: start analytics
     //Init analytics here
-    if (args.GetBoolArg("-ohlcvp", DEFAULT_OHLCVP) || args.GetBoolArg("-asopr", DEFAULT_ASOPR)) {
-        g_ohlcvp = std::make_unique<Ohlcvp>(interfaces::MakeChain(node), gArgs.GetDataDirNet() / "analytics\\analytics.db");
-        node.analytics.emplace_back(g_asopr.get());
-    }
-
-    if (args.GetBoolArg("-asopr", DEFAULT_ASOPR)) {
+    /* if (args.GetBoolArg("-asopr", DEFAULT_ASOPR)) {
         g_asopr = std::make_unique<Asopr>(interfaces::MakeChain(node), gArgs.GetDataDirNet() / "analytics\\analytics.db");
         node.analytics.emplace_back(g_asopr.get());
+    }*/
+
+    if (args.GetBoolArg("-ohlcvp", DEFAULT_OHLCVP) || args.GetBoolArg("-asopr", DEFAULT_ASOPR)) {
+        g_ohlcvp = std::make_unique<Ohlcvp>(interfaces::MakeChain(node), gArgs.GetDataDirNet() / "analytics\\analytics.db");
+        node.analytics.emplace_back(g_ohlcvp.get());
     }
 
-    // Init analytics
-    auto analyticsManager = new AnalyticsManager(node.analytics);
-    if (!analyticsManager->Init())  return false;
+    
 
-    //for (auto analytic : node.analytics) if (!analytic->Init()) return false;
+    // Init analytics
+    //auto analyticsManager = new AnalyticsManager(node.analytics);
+    //if (!analyticsManager->Init())  return false;
+
+    for (auto analytic : node.analytics) if (!analytic->Init()) return false;
 
     // ********************************************************* Step 9: load wallet
     for (const auto& client : node.chain_clients) {

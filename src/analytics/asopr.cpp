@@ -36,17 +36,24 @@ public:
     //bool WriteAsopr(const std::pair<uint64_t,std::vector<double>>& vAsopr) const;
 
     /// Write a batch of transaction positions to the DB.
-    [[nodiscard]] bool WriteAsopr(const std::pair<uint64_t,std::vector<double>>& vAsopr);
+    [[nodiscard]] bool WriteAsopr(const AnalyticsRow& vAsopr);
 };
 
 Asopr::DB::DB(const fs::path& path, std::string column_name) :
-    BaseAnalytic::DB(path)
+    BaseAnalytic::DB(
+    StorageUtils::AnalyticStorageConfig{
+        .analytic_id = "asopr",
+        .db_path = gArgs.GetDataDirNet() / "analytics" / "analytics.db ",
+        .sqlite_db = nullptr,
+        .table_name = "analytics",
+        .columns = {{"height", "PRIMARY INTEGER"}, {"asopr","REAL"}},  
+    })
 {}
 //gArgs.GetDataDirNet() "/analytics"
 
 
 
-bool Asopr::DB::WriteAsopr(const std::pair<uint64_t,std::vector<double>>& vAsopr)
+bool Asopr::DB::WriteAsopr(const AnalyticsRow& vAsopr)
 {
     return WriteAnalytics(vAsopr);
 }
@@ -103,7 +110,7 @@ bool Asopr::CustomAppend(const interfaces::BlockInfo& block)
 
     if (!asopr.has_value()) { return true;} //price missing, skip to next
 
-    std::pair<uint64_t,std::vector<double>> vAsopr = std::make_pair(blockTime,std::vector<double>{asopr.value()}); 
+    AnalyticsRow vAsopr = std::make_pair(blockTime, std::vector<std::variant<int64_t, double>>{asopr.value()}); 
 
     return m_db->WriteAsopr(vAsopr);
 }
