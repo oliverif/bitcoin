@@ -75,6 +75,7 @@ protected:
 
         bool WriteAnalytics(const AnalyticsRow& analytics);
         bool WriteAnalytics(const AnalyticsBatch& analytics);
+        const StorageUtils::AnalyticStorageConfig& GetStorageConfig() const;
 
         ~DB();
     };

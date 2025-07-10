@@ -136,53 +136,41 @@ bool Ohlcvp::LoadCsvToBatch(const std::string& file_path, AnalyticsBatch& out_ba
     return true;
 }
 
-bool Ohlcvp::GetKlines(const interfaces::BlockInfo& block)
+bool Ohlcvp::GetKlines(const interfaces::BlockInfo& block, AnalyticsRow& new_row)
 {
-    int64_t start_height = 
+    int64_t start_height = block.height - 1;
+    AnalyticsRow prev_row;
+    if (!GetDB().ReadAnalytics(prev_row, GetDB().GetStorageConfig().columns, start_height)) {
+        LogError("Could not read previous row");
+        return false;
+    }
+    int64_t start_timestamp = std::get<int64_t>(prev_row.second[2]);
 
-    // 1. Step: Get last synced timestamp from SQLite DB
-    int64_t start_timestamp;
-    {
-        auto stmt = m_db->Prepare("SELECT MAX(timestamp) FROM analytics;");
-        if (sqlite3_step(stmt) == SQLITE_ROW) {
-            start_timestamp = sqlite3_column_int64(stmt, 0);
-        } else {
-            log_stream << "Failed to read last timestamp from DB\n";
+    int64_t end_height = block.height;
+    int64_t end_timestamp = block.chain_time_max;
+    new_row = prev_row;
+    new_row.second[1] = block.data->GetBlockTime();
+    new_row.second[2] = block.chain_time_max;
+
+    //Copy previous row if same timestamp
+    if (end_timestamp == start_timestamp) {
+        if (!GetDB().WriteAnalytics(new_row)) {
+            LogError("Could not copy previous row");
             return false;
         }
-        sqlite3_finalize(stmt);
     }
 
-    // 2. Step: Get all blocks from last timestamp up to tip
-    std::vector<std::pair<int64_t, uint64_t>> raw_blocks; // timestamp, height
-    const CBlockIndex* pindex = WITH_LOCK(cs_main, return m_chainstate->m_blockman.LookupBlockIndex(m_chain->getTipHash()));
-    while (pindex && pindex->GetBlockTime() > start_timestamp) {
-        raw_blocks.emplace_back(pindex->GetBlockTime(), pindex->nHeight);
-        pindex = pindex->pprev;
-    }
-    std::reverse(raw_blocks.begin(), raw_blocks.end());
-
-    if (raw_blocks.empty()) return true; // Already synced
-
-    // 3. Step: Clean block times to be strictly increasing
-    for (size_t i = 1; i < raw_blocks.size(); ++i) {
-        if (raw_blocks[i].first <= raw_blocks[i - 1].first) {
-            raw_blocks[i].first = raw_blocks[i - 1].first + 1;
-        }
-    }
-
-    // 4. Step: Prepare kline API request
-    int64_t end_timestamp = raw_blocks.back().first;
     int64_t request_start = start_timestamp * 1000; // ms
     int64_t request_end = end_timestamp * 1000;
 
     int64_t interval_ms = 60 * 1000;
     int64_t max_duration = 1000 * interval_ms;
     if (request_end - request_start > max_duration) {
-        request_end = request_start + max_duration;
+        LogError("Interval between blocks is too large for api");
+        return false;
     }
 
-    std::string url = "https://api.binance.com/api/v3/klines?symbol=" + symbol +
+    std::string url = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT" +
                       "&interval=1m&startTime=" + std::to_string(request_start) +
                       "&endTime=" + std::to_string(request_end);
 

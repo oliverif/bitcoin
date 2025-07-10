@@ -258,6 +258,11 @@ bool BaseAnalytic::DB::WriteAnalytics(const AnalyticsBatch& analytics)
     return true;
 }
 
+const StorageUtils::AnalyticStorageConfig& BaseAnalytic::DB::GetStorageConfig() const
+{
+    return storageConfig;
+}
+
 BaseAnalytic::BaseAnalytic(std::unique_ptr<interfaces::Chain> chain, std::string name)
     : m_chain{std::move(chain)}, m_name{std::move(name)} {}
 
