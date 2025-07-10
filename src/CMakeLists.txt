@@ -294,8 +294,11 @@ add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   $<$<NOT:$<TARGET_EXISTS:bitcoin_wallet>>:dummywallet.cpp>
 )
 find_package(Arrow REQUIRED)
+find_package(CURL REQUIRED)
+find_package(nlohmann_json REQUIRED)
 target_link_libraries(bitcoin_node
   PRIVATE
+    
     core_interface
     bitcoin_common
     bitcoin_util
@@ -305,6 +308,8 @@ target_link_libraries(bitcoin_node
     univalue
     Arrow::arrow_shared
     Boost::headers
+    CURL::libcurl
+    nlohmann_json::nlohmann_json
     $<TARGET_NAME_IF_EXISTS:libevent::core>
     $<TARGET_NAME_IF_EXISTS:libevent::extra>
     $<TARGET_NAME_IF_EXISTS:libevent::pthreads>

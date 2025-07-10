@@ -17,8 +17,11 @@
 #include <undo.h>
 #include <univalue.h>
 #include <validation.h>
+#include <curl/curl.h>
+#include <sstream>
+#include <nlohmann/json.hpp>
 
-
+using json = nlohmann::json;
 std::unique_ptr<Ohlcvp> g_ohlcvp;
 
 
@@ -83,7 +86,7 @@ bool Ohlcvp::LoadCsvToBatch(const std::string& file_path, AnalyticsBatch& out_ba
 {
     std::ifstream file(file_path);
     if (!file.is_open()) {
-        LogError("Could not open CSV file: " + file_path);
+        LogError("%s: Could not open CSV file: %s\n", __func__, file_path);
         return false;
     }
 
@@ -110,7 +113,7 @@ bool Ohlcvp::LoadCsvToBatch(const std::string& file_path, AnalyticsBatch& out_ba
         try {
             values.first = std::stoull(cells[0]);
         } catch (const std::exception& e) {
-            LogError("Invalid key at line " + std::to_string(line_num) + ": " + e.what());
+            LogError("%s: Invalid key at line %s : %s \n", __func__, std::to_string(line_num), e.what());
             return false;
         }
 
@@ -124,8 +127,7 @@ bool Ohlcvp::LoadCsvToBatch(const std::string& file_path, AnalyticsBatch& out_ba
                     values.second.emplace_back(std::stoll(str));
                 }
             } catch (const std::exception& e) {
-                LogError("Invalid numeric value at line " + std::to_string(line_num) +
-                         ", column " + std::to_string(i + 1) + ": " + e.what());
+                LogError("%s: Invalid numeric value at line %s, column %s: %s\n", __func__, std::to_string(line_num), std::to_string(i + 1), e.what());
                 return false;
             }
         }
@@ -136,12 +138,53 @@ bool Ohlcvp::LoadCsvToBatch(const std::string& file_path, AnalyticsBatch& out_ba
     return true;
 }
 
+
+
+bool Ohlcvp::HttpGet(const std::string& url, json& response)
+{
+    CURL* curl = curl_easy_init();
+    if (!curl) {
+        LogError("%s: Failed to initialize CURL\n", __func__);
+        return false;
+    }
+
+    std::ostringstream response_stream;
+
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L); // Follow redirects
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);       // Timeout after 10 seconds
+
+    // Write callback
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, +[](char* ptr, size_t size, size_t nmemb, void* userdata) -> size_t {
+            auto* stream = static_cast<std::ostringstream*>(userdata);
+            stream->write(ptr, size * nmemb);
+            return size * nmemb; });
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_stream);
+
+    CURLcode res = curl_easy_perform(curl);
+    if (res != CURLE_OK) {
+        LogError("%s: CURL request failed: %s\n", __func__, curl_easy_strerror(res));
+        curl_easy_cleanup(curl);
+        return false;
+    }
+
+    curl_easy_cleanup(curl);
+    std::string response_body = response_stream.str();
+    try {
+        response = json::parse(response_body);
+    } catch (const std::exception& e) {
+        LogError("%s: Failed to parse JSON: %s\n", __func__, e.what());
+        return false;
+    }
+    return true;
+}
+
 bool Ohlcvp::GetKlines(const interfaces::BlockInfo& block, AnalyticsRow& new_row)
 {
     int64_t start_height = block.height - 1;
     AnalyticsRow prev_row;
     if (!GetDB().ReadAnalytics(prev_row, GetDB().GetStorageConfig().columns, start_height)) {
-        LogError("Could not read previous row");
+        LogError("%s: Could not read previous row\n", __func__);
         return false;
     }
     int64_t start_timestamp = std::get<int64_t>(prev_row.second[2]);
@@ -155,7 +198,7 @@ bool Ohlcvp::GetKlines(const interfaces::BlockInfo& block, AnalyticsRow& new_row
     //Copy previous row if same timestamp
     if (end_timestamp == start_timestamp) {
         if (!GetDB().WriteAnalytics(new_row)) {
-            LogError("Could not copy previous row");
+            LogError("%s: Could not copy previous row\n", __func__);
             return false;
         }
     }
@@ -166,76 +209,18 @@ bool Ohlcvp::GetKlines(const interfaces::BlockInfo& block, AnalyticsRow& new_row
     int64_t interval_ms = 60 * 1000;
     int64_t max_duration = 1000 * interval_ms;
     if (request_end - request_start > max_duration) {
-        LogError("Interval between blocks is too large for api");
+        LogError("%s: Interval between blocks is too large for api\n", __func__);
         return false;
     }
 
-    std::string url = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT" +
-                      "&interval=1m&startTime=" + std::to_string(request_start) +
-                      "&endTime=" + std::to_string(request_end);
+    std::string url = std::string("https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=") + std::to_string(request_start) + "&endTime=" + std::to_string(request_end);
 
-    std::string response_json;
+    json response_json;
     if (!HttpGet(url, response_json)) {
-        log_stream << "Failed to fetch klines from Binance\n";
+        LogError("%s: Failed to fetch klines from Binance\n",__func__);
         return false;
     }
 
-    UniValue json;
-    if (!json.read(response_json)) {
-        log_stream << "Failed to parse Binance kline JSON\n";
-        return false;
-    }
-
-    // 5. Step: Parse response and bucket into blocks
-    size_t kline_idx = 0;
-    std::vector<AnalyticsRow> analytics_rows;
-    for (size_t i = 1; i < raw_blocks.size(); ++i) {
-        int64_t start_time = raw_blocks[i - 1].first * 1000;
-        int64_t end_time = raw_blocks[i].first * 1000;
-
-        double open = -1, high = -1, low = -1, close = -1, volume = 0, price = 0;
-        int count = 0;
-
-        while (kline_idx < json.size()) {
-            int64_t kline_time = json[kline_idx][0].get_int64();
-            if (kline_time >= end_time) break;
-            if (kline_time >= start_time) {
-                double o = std::stod(json[kline_idx][1].get_str());
-                double h = std::stod(json[kline_idx][2].get_str());
-                double l = std::stod(json[kline_idx][3].get_str());
-                double c = std::stod(json[kline_idx][4].get_str());
-                double v = std::stod(json[kline_idx][5].get_str());
-                if (open < 0) open = o;
-                high = (high < 0) ? h : std::max(high, h);
-                low = (low < 0) ? l : std::min(low, l);
-                close = c;
-                volume += v;
-                price += c;
-                count++;
-            }
-            ++kline_idx;
-        }
-
-        if (count > 0) {
-            AnalyticsRow row;
-            row.first = raw_blocks[i].second; // height
-            row.second = {
-                raw_blocks[i - 1].first, // original block time
-                raw_blocks[i].first,     // cleaned timestamp
-                open, high, low, close, volume,
-                price / count // avg price
-            };
-            analytics_rows.push_back(row);
-        }
-    }
-
-    // 6. Step: Write to DB
-    if (!analytics_rows.empty() && !m_db->WriteOhlcvp(analytics_rows)) {
-        log_stream << "Failed to write klines to DB\n";
-        return false;
-    }
-
-    return true;
 
     return false;
 }
@@ -254,7 +239,10 @@ bool Ohlcvp::CustomAppend(const interfaces::BlockInfo& block)
     if (!m_chainstate->m_blockman.ReadBlockUndo(block_undo, *pindex)) {
         return false;
     }
-
+    AnalyticsRow new_row;
+    if (!GetKlines(block, new_row)) {
+        return false;
+    }
 
     return false;
 }
@@ -264,11 +252,11 @@ bool Ohlcvp::CustomInit(const std::optional<interfaces::BlockRef>& block)
     if (!block) {
         AnalyticsBatch out_batch;
         if (!LoadCsvToBatch("D:\\Code\bitcoin\\ohlcvp.csv", out_batch)) {
-            LogError("Could not load backfill csv for ohlcvp");
+            LogError("%s: Could not load backfill csv for ohlcvp\n", __func__);
             return false;
         }
         if (!GetDB().WriteAnalytics(out_batch)) {
-            LogError("Could not write backfill data to db for ohlcvp");
+            LogError("%s: Could not write backfill data to db for ohlcvp\n", __func__);
             return false;
         }
         auto last_height = out_batch.back().first;

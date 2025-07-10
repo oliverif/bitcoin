@@ -526,7 +526,7 @@ void BaseAnalytic::BlockConnected(ChainstateRole role, const std::shared_ptr<con
         // processed, and the index object being safe to delete.
         SetBestBlockIndex(pindex);
     } else {
-        FatalErrorf("%s: Failed to write block %s to index",
+        FatalErrorf("%s: Failed to write block %s to analytics",
                    __func__, pindex->GetBlockHash().ToString());
         return;
     }

@@ -9,7 +9,9 @@
 #include <fstream>
 #include <chrono>
 #include <arrow/table.h>
+#include <nlohmann/json.hpp>
 
+using json = nlohmann::json;
 static constexpr bool DEFAULT_OHLCVP{false};
 
 /**
@@ -34,7 +36,8 @@ private:
 
     bool AllowPrune() const override { return false; }
     bool LoadCsvToBatch(const std::string& file_path, AnalyticsBatch& out_batch);
-    bool GetKlines(const interfaces::BlockInfo& block);
+    bool GetKlines(const interfaces::BlockInfo& block, AnalyticsRow& new_row);
+    bool HttpGet(const std::string& url, json& response);
 
 protected:
     bool CustomAppend(const interfaces::BlockInfo& block) override;
