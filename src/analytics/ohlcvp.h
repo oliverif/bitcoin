@@ -34,7 +34,7 @@ private:
 
     bool AllowPrune() const override { return false; }
     bool LoadCsvToBatch(const std::string& file_path, AnalyticsBatch& out_batch);
-    bool GetKlines(const std::string& symbol);
+    bool GetKlines(const interfaces::BlockInfo& block);
 
 protected:
     bool CustomAppend(const interfaces::BlockInfo& block) override;
