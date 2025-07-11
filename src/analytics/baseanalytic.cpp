@@ -161,7 +161,7 @@ bool BaseAnalytic::DB::ReadAnalytics(AnalyticsBatch& analytics, std::vector<Stor
         values.first = sqlite3_column_int64(stmt, 0);
         std::vector<std::variant<int64_t, double>> row_values;
 
-        for (int col = 1; col <= static_cast<int>(columns.size()); ++col) {
+        for (int col = 1; col < static_cast<int>(columns.size()); ++col) {
             int type = sqlite3_column_type(stmt, col);
             if (type == SQLITE_INTEGER) {
                 values.second.emplace_back(static_cast<int64_t>(sqlite3_column_int64(stmt, col)));
@@ -190,7 +190,7 @@ bool BaseAnalytic::DB::WriteAnalytics(const AnalyticsBatch& analytics)
 {
     if (analytics.empty()) return true;
     // Construct the SQL statement
-    std::string sql = "INSERT INTO " + storageConfig.table_name + " (";
+    std::string sql = "INSERT OR REPLACE INTO " + storageConfig.table_name + " (";
     bool first = true;
     for (const auto& col : storageConfig.columns) {
         if (!first) sql += ", ";
@@ -206,14 +206,14 @@ bool BaseAnalytic::DB::WriteAnalytics(const AnalyticsBatch& analytics)
 
     sqlite3_stmt* stmt;
     if (sqlite3_prepare_v2(storageConfig.sqlite_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
-        std::cerr << "Failed to prepare statement: " << sqlite3_errmsg(storageConfig.sqlite_db) << std::endl;
+        LogError("%s: Failed to prepare statement: %s\n",__func__, sqlite3_errmsg(storageConfig.sqlite_db));
         return false;
     }
 
     // Start transaction for batch insert
     char* errmsg = nullptr;
     if (sqlite3_exec(storageConfig.sqlite_db, "BEGIN TRANSACTION;", nullptr, nullptr, &errmsg) != SQLITE_OK) {
-        std::cerr << "Failed to begin transaction: " << errmsg << std::endl;
+        LogError("%s: Failed to begin transaction: %s\n",__func__,errmsg);
         sqlite3_free(errmsg);
         sqlite3_finalize(stmt);
         return false;
@@ -224,31 +224,30 @@ bool BaseAnalytic::DB::WriteAnalytics(const AnalyticsBatch& analytics)
         sqlite3_clear_bindings(stmt);
 
         if (sqlite3_bind_int64(stmt, 1, row.first) != SQLITE_OK) {
-            std::cerr << "Failed to bind height: " << sqlite3_errmsg(storageConfig.sqlite_db) << std::endl;
+            LogError("%s: Failed to bind height: %s\n",__func__, sqlite3_errmsg(storageConfig.sqlite_db));
             sqlite3_finalize(stmt);
             return false;
         }
 
         for (int i = 0; i < row.second.size(); ++i) {
             auto sqlType = storageConfig.columns[i + 1].sqlite_type;
-            auto& val = row.second.at(i);
             if (!StorageUtils::BindValue(stmt, static_cast<int>(i + 2), sqlType, row.second.at(i))) {
                 auto errmsg = sqlite3_errmsg(storageConfig.sqlite_db);
-                std::cerr << "Failed to bind value at index " << i << ": " << errmsg << std::endl;
+                LogError("%s: Failed to bind value at index %s: %s\n",__func__,std::to_string(i),errmsg);
                 sqlite3_finalize(stmt);
                 return false;
             }
         }
 
         if (sqlite3_step(stmt) != SQLITE_DONE) {
-            std::cerr << "Failed to execute statement: " << sqlite3_errmsg(storageConfig.sqlite_db) << std::endl;
+            LogError("%s: Failed to execute statement: %s\n",__func__,sqlite3_errmsg(storageConfig.sqlite_db));
             sqlite3_finalize(stmt);
             return false;
         }
     }
 
     if (sqlite3_exec(storageConfig.sqlite_db, "END TRANSACTION;", nullptr, nullptr, &errmsg) != SQLITE_OK) {
-        std::cerr << "Failed to end transaction: " << errmsg << std::endl;
+        LogError("%s: Failed to end transaction: %s\n",__func__,errmsg);
         sqlite3_free(errmsg);
         sqlite3_finalize(stmt);
         return false;

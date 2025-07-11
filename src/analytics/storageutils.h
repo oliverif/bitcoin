@@ -162,7 +162,7 @@ inline bool ValidateConfig(AnalyticStorageConfig& config, bool create_if_missing
 inline bool BindValue(sqlite3_stmt* stmt, int index, const std::string& type, const std::variant<int64_t, double>& value)
 {
     if (type == "INTEGER") {
-        return sqlite3_bind_int64(stmt, index, static_cast<int64_t>(std::get<double>(value))) == SQLITE_OK;
+        return sqlite3_bind_int64(stmt, index, std::get<int64_t>(value)) == SQLITE_OK;
     } else if (type == "REAL") {
         return sqlite3_bind_double(stmt, index, std::get<double>(value)) == SQLITE_OK;
     } else {

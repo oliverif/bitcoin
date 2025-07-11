@@ -20,6 +20,7 @@
 #include <curl/curl.h>
 #include <sstream>
 #include <nlohmann/json.hpp>
+#include <algorithm>
 
 using json = nlohmann::json;
 std::unique_ptr<Ohlcvp> g_ohlcvp;
@@ -91,7 +92,7 @@ bool Ohlcvp::LoadCsvToBatch(const std::string& file_path, AnalyticsBatch& out_ba
     }
     std::string line;
     bool first_line = true;
-
+    StorageUtils::AnalyticStorageConfig config = m_db->GetStorageConfig();
     while (std::getline(file, line)) {
         if (first_line) {
             first_line = false; // Skip header row
@@ -116,15 +117,21 @@ bool Ohlcvp::LoadCsvToBatch(const std::string& file_path, AnalyticsBatch& out_ba
             return false;
         }
 
-
+        int col = 1;
         while (std::getline(ss, cell, ',')) {
             try {
-                double val = std::stod(cell);
-                values.second.push_back(val);
+                if (config.columns[col].sqlite_type == "REAL") {
+                    double val = std::stod(cell);
+                    values.second.push_back(val);
+                } else if (config.columns[col].sqlite_type == "INTEGER") {
+                    int val = std::stoull(cell);
+                    values.second.push_back(val);
+                }
             } catch (const std::exception& e) {
                 LogError("%s: Invalid double value '%s' in line: %s",__func__,cell,line);
                 return false;
             }
+            col++;
         }
 
         out_batch.emplace_back(values);
@@ -182,13 +189,13 @@ bool Ohlcvp::GetKlines(const interfaces::BlockInfo& block, AnalyticsRow& new_row
         LogError("%s: Could not read previous row\n", __func__);
         return false;
     }
-    int64_t start_timestamp = std::get<int64_t>(prev_row.second[2]);
+    int64_t start_timestamp = std::get<int64_t>(prev_row.second[1]);
 
     int64_t end_height = block.height;
     int64_t end_timestamp = block.chain_time_max;
     new_row = prev_row;
-    new_row.second[1] = block.data->GetBlockTime();
-    new_row.second[2] = block.chain_time_max;
+    new_row.second[0] = block.data->GetBlockTime();
+    new_row.second[1] = static_cast<int64_t>(block.chain_time_max);
 
     //Copy previous row if same timestamp
     if (end_timestamp == start_timestamp) {
@@ -217,7 +224,42 @@ bool Ohlcvp::GetKlines(const interfaces::BlockInfo& block, AnalyticsRow& new_row
     }
 
 
-    return false;
+    std::vector<double> opens;
+    std::vector<double> highs;
+    std::vector<double> lows;
+    std::vector<double> closes;
+    std::vector<double> volumes;
+    for (const auto& kline : response_json) {
+        opens.push_back(std::stod(kline[1].get<std::string>()));
+        highs.push_back(std::stod(kline[2].get<std::string>()));
+        lows.push_back(std::stod(kline[3].get<std::string>()));
+        closes.push_back(std::stod(kline[4].get<std::string>()));
+        volumes.push_back(std::stod(kline[5].get<std::string>()));
+    }
+    double open = opens[0];
+    double high = *std::max_element(highs.begin(),highs.end());
+    double low = *std::min_element(lows.begin(), lows.end());
+    double close = closes.back();
+    double volume = std::accumulate(volumes.begin(), volumes.end(), 0.0);
+    double price;
+    if (volume == 0.0) {
+        price = (high + low + close) / 3;
+    } else {
+        double weighted_sum = 0.0;
+        for (size_t i = 0; i < highs.size(); i++) {
+            weighted_sum += (highs[i] + lows[i] + closes[i]) / 3 * volumes[i];
+        }
+        price = weighted_sum / volume;
+    }
+    new_row.second[2] = open;
+    new_row.second[3] = high;
+    new_row.second[4] = low;
+    new_row.second[5] = close;
+    new_row.second[6] = volume;
+    new_row.second[7] = price;
+
+
+    return true;
 }
 
 bool Ohlcvp::CustomAppend(const interfaces::BlockInfo& block)
@@ -236,10 +278,16 @@ bool Ohlcvp::CustomAppend(const interfaces::BlockInfo& block)
     }
     AnalyticsRow new_row;
     if (!GetKlines(block, new_row)) {
+        LogError("%s: Could not write new row for ohlcvp\n", __func__);
         return false;
     }
 
-    return false;
+    if (!m_db->WriteOhlcvp(new_row)) {
+        LogError("%s: Could not write new row for ohlcvp\n", __func__);
+        return false;
+    }
+
+    return true;
 }
 
 bool Ohlcvp::CustomInit(const std::optional<interfaces::BlockRef>& block)
