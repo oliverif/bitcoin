@@ -6,6 +6,7 @@
 #include <sqlite3.h>
 #include <util/fs.h>
 #include <variant>
+#include <logging.h>
 
 
 namespace StorageUtils {
@@ -29,7 +30,7 @@ inline bool OpenDb(AnalyticStorageConfig& config, bool create_if_missing)
     if (sqlite3_open_v2(config.db_path.utf8string().c_str(), &config.sqlite_db, create_if_missing ? SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE : SQLITE_OPEN_READWRITE, nullptr) != SQLITE_OK) {
         std::string error_msg = "Can't open database: " + std::string(sqlite3_errmsg(config.sqlite_db));
         sqlite3_close(config.sqlite_db); // Ensure the database is closed if open failed
-        throw std::runtime_error(error_msg);
+        LogError("%s: %s\n",__func__,error_msg);
         return false;
     }
     return true;
@@ -38,7 +39,7 @@ inline bool OpenDb(AnalyticStorageConfig& config, bool create_if_missing)
 inline bool dbExist(AnalyticStorageConfig& config, bool create_if_missing)
 {
     if (!fs::exists(config.db_path.parent_path())) {
-        throw std::runtime_error("Path to db does not exist: " + config.db_path.parent_path().string());
+        LogError("%s: Path to db does not exist: %s\n",__func__,config.db_path.parent_path().string());
         return false;
     } else {
         return OpenDb(config, create_if_missing);
@@ -65,7 +66,7 @@ inline bool CreateTable(AnalyticStorageConfig& config)
 
     char* err_msg = nullptr;
     if (sqlite3_exec(config.sqlite_db, sql.c_str(), nullptr, nullptr, &err_msg) != SQLITE_OK) {
-        throw std::runtime_error("SQL error (creating tables): " + std::string(err_msg));
+        LogError("%s: SQL error (creating tables): %s",__func__,std::string(err_msg));
         sqlite3_free(err_msg);
     }
     return true;
@@ -86,7 +87,7 @@ inline bool TableExists(AnalyticStorageConfig& config, bool create_if_missing)
         sqlite3_finalize(stmt);
         return false;
     }
-    throw std::runtime_error("Failed to prepare table check: " + std::string(sqlite3_errmsg(config.sqlite_db)));
+    LogError("%s: Failed to prepare table check: %s",__func__, std::string(sqlite3_errmsg(config.sqlite_db)));
 
     return false;
 }
@@ -100,7 +101,7 @@ inline bool AddColumns(AnalyticStorageConfig& config, std::vector<ColumnSpec> co
         char* err_msg = nullptr;
 
         if (sqlite3_exec(config.sqlite_db, alter_sql.c_str(), nullptr, nullptr, &err_msg) != SQLITE_OK) {
-            throw std::runtime_error("SQL error when adding column '" + column.name + "': " + err_msg);
+            LogError("%s: SQL error when adding column '%s': %s",__func__,column.name,err_msg);
             sqlite3_free(err_msg);
             success = false;
         }
@@ -114,7 +115,7 @@ inline bool ColumnsExist(AnalyticStorageConfig& config, bool create_if_missing)
     std::string query = "PRAGMA table_info(" + config.table_name + ");";
     sqlite3_stmt* stmt;
     if (sqlite3_prepare_v2(config.sqlite_db, query.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
-        throw std::runtime_error("Failed to prepare statement: " + std::string(sqlite3_errmsg(config.sqlite_db)));
+        LogError("%s: Failed to prepare statement: %s",__func__,std::string(sqlite3_errmsg(config.sqlite_db)));
         return false;
     }
 
@@ -138,7 +139,7 @@ inline bool ColumnsExist(AnalyticStorageConfig& config, bool create_if_missing)
         if (create_if_missing) {
             return AddColumns(config, missing);
         } else {
-            throw std::runtime_error("Columns for analytic " + config.analytic_id + " does not exist in table "+ config.table_name);
+            LogError("%s: Columns for analytic '%s' does not exist in table %s",__func__, config.analytic_id,config.table_name);
             return false;
         }
     }
@@ -165,7 +166,7 @@ inline bool BindValue(sqlite3_stmt* stmt, int index, const std::string& type, co
     } else if (type == "REAL") {
         return sqlite3_bind_double(stmt, index, std::get<double>(value)) == SQLITE_OK;
     } else {
-        throw std::runtime_error("Unsupported SQLite column type: " + type);
+        LogError("%s: Unsupported SQLite column type: %s",__func__,type);
         return false;
     }
 }

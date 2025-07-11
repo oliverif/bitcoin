@@ -46,8 +46,8 @@ Ohlcvp::DB::DB(const fs::path& path, std::string column_name) : BaseAnalytic::DB
         .sqlite_db = nullptr,
         .table_name = "analytics",
         .columns = {
-            {"height", "PRIMARY INTEGER"},
-            {"original_timestamp", "INTEGER"},
+            {"height", "INTEGER PRIMARY KEY"},
+            {"original_blocktime", "INTEGER"},
             {"timestamp", "INTEGER"},
             {"open", "REAL"},
             {"high", "REAL"},
@@ -89,45 +89,40 @@ bool Ohlcvp::LoadCsvToBatch(const std::string& file_path, AnalyticsBatch& out_ba
         LogError("%s: Could not open CSV file: %s\n", __func__, file_path);
         return false;
     }
-
     std::string line;
-    size_t line_num = 0;
+    bool first_line = true;
 
     while (std::getline(file, line)) {
-        ++line_num;
+        if (first_line) {
+            first_line = false; // Skip header row
+            continue;
+        }
+        if (line.empty()) continue;
+
         std::stringstream ss(line);
         std::string cell;
-        std::vector<std::string> cells;
 
-        // Split line by comma
-        while (std::getline(ss, cell, ',')) {
-            cells.push_back(cell);
+        // Read height (first column)
+        if (!std::getline(ss, cell, ',')) {
+            LogError("%s: Malformed line (missing height):%s",__func__,line);
+            return false;
         }
-
-        if (cells.empty()) {
-            continue; // Skip empty lines
-        }
-
-        // Parse first column as uint64_t key
         AnalyticsRow values;
+        values.first = 0;
         try {
-            values.first = std::stoull(cells[0]);
+            values.first = std::stoull(cell);
         } catch (const std::exception& e) {
-            LogError("%s: Invalid key at line %s : %s \n", __func__, std::to_string(line_num), e.what());
+            LogError("%s: Invalid height value '%s' in line: %s",__func__,cell, line);
             return false;
         }
 
-        for (size_t i = 1; i < cells.size(); ++i) {
-            const std::string& str = cells[i];
 
+        while (std::getline(ss, cell, ',')) {
             try {
-                if (str.find('.') != std::string::npos || str.find('e') != std::string::npos || str.find('E') != std::string::npos) {
-                    values.second.emplace_back(std::stod(str));
-                } else {
-                    values.second.emplace_back(std::stoll(str));
-                }
+                double val = std::stod(cell);
+                values.second.push_back(val);
             } catch (const std::exception& e) {
-                LogError("%s: Invalid numeric value at line %s, column %s: %s\n", __func__, std::to_string(line_num), std::to_string(i + 1), e.what());
+                LogError("%s: Invalid double value '%s' in line: %s",__func__,cell,line);
                 return false;
             }
         }
@@ -251,7 +246,7 @@ bool Ohlcvp::CustomInit(const std::optional<interfaces::BlockRef>& block)
 {
     if (!block) {
         AnalyticsBatch out_batch;
-        if (!LoadCsvToBatch("D:\\Code\bitcoin\\ohlcvp.csv", out_batch)) {
+        if (!LoadCsvToBatch("D:\\Code\\bitcoin\\ohlcvp.csv", out_batch)) {
             LogError("%s: Could not load backfill csv for ohlcvp\n", __func__);
             return false;
         }
