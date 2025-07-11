@@ -27,12 +27,31 @@ struct AnalyticStorageConfig {
 
 inline bool OpenDb(AnalyticStorageConfig& config, bool create_if_missing)
 {
-    if (sqlite3_open_v2(config.db_path.utf8string().c_str(), &config.sqlite_db, create_if_missing ? SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE : SQLITE_OPEN_READWRITE, nullptr) != SQLITE_OK) {
+    if (sqlite3_open_v2(config.db_path.utf8string().c_str(), &config.sqlite_db,
+                        create_if_missing ? (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE) : SQLITE_OPEN_READWRITE,
+                        nullptr) != SQLITE_OK) {
         std::string error_msg = "Can't open database: " + std::string(sqlite3_errmsg(config.sqlite_db));
         sqlite3_close(config.sqlite_db); // Ensure the database is closed if open failed
-        LogError("%s: %s\n",__func__,error_msg);
+        LogError("%s: %s\n", __func__, error_msg);
         return false;
     }
+
+    // Enable WAL journal mode
+    char* errmsg = nullptr;
+    if (sqlite3_exec(config.sqlite_db, "PRAGMA journal_mode=WAL;", nullptr, nullptr, &errmsg) != SQLITE_OK) {
+        LogError("%s: Failed to set WAL mode: %s\n", __func__, errmsg);
+        sqlite3_free(errmsg);
+        sqlite3_close(config.sqlite_db);
+        return false;
+    }
+
+    // Set busy timeout (e.g., 5 seconds)
+    if (sqlite3_busy_timeout(config.sqlite_db, 5000) != SQLITE_OK) {
+        LogError("%s: Failed to set busy timeout: %s\n", __func__, sqlite3_errmsg(config.sqlite_db));
+        sqlite3_close(config.sqlite_db);
+        return false;
+    }
+
     return true;
 }
 

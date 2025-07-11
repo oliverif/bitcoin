@@ -169,6 +169,14 @@ bool Ohlcvp::HttpGet(const std::string& url, json& response)
         curl_easy_cleanup(curl);
         return false;
     }
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_easy_cleanup(curl);
+
+    if (http_code != 200) {
+        LogError("%s: HTTP request returned status code %ld\n", __func__, http_code);
+        return false;
+    }
 
     curl_easy_cleanup(curl);
     std::string response_body = response_stream.str();
@@ -178,6 +186,7 @@ bool Ohlcvp::HttpGet(const std::string& url, json& response)
         LogError("%s: Failed to parse JSON: %s\n", __func__, e.what());
         return false;
     }
+
     return true;
 }
 
@@ -193,23 +202,32 @@ bool Ohlcvp::GetKlines(const interfaces::BlockInfo& block, AnalyticsRow& new_row
 
     int64_t end_height = block.height;
     int64_t end_timestamp = block.chain_time_max;
+    if (start_height > 898154) {
+        assert(start_timestamp);
+        assert(end_timestamp);
+    }
+    
     new_row = prev_row;
+    new_row.first = end_height;
     new_row.second[0] = block.data->GetBlockTime();
     new_row.second[1] = static_cast<int64_t>(block.chain_time_max);
 
-    //Copy previous row if same timestamp
-    if (end_timestamp == start_timestamp) {
-        if (!GetDB().WriteAnalytics(new_row)) {
-            LogError("%s: Could not copy previous row\n", __func__);
-            return false;
-        }
-    }
+    
 
     int64_t request_start = start_timestamp * 1000; // ms
     int64_t request_end = end_timestamp * 1000;
 
     int64_t interval_ms = 60 * 1000;
     int64_t max_duration = 1000 * interval_ms;
+
+    // Copy previous row if same timestamp
+    if (end_timestamp == start_timestamp || (end_timestamp - start_timestamp) < interval_ms) {
+        if (!GetDB().WriteAnalytics(new_row)) {
+            LogError("%s: Could not copy previous row\n", __func__);
+            return false;
+        }
+        return true;
+    }
     if (request_end - request_start > max_duration) {
         LogError("%s: Interval between blocks is too large for api\n", __func__);
         return false;
