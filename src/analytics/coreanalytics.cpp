@@ -118,31 +118,18 @@ bool CoreAnalytics::CustomAppend(const interfaces::BlockInfo& block)
 
     assert(block.data);
 
-    uint64_t blockTime = block.data->GetBlockHeader().nTime;
-
     CBlockUndo block_undo;
     const CBlockIndex* pindex = WITH_LOCK(cs_main, return m_chainstate->m_blockman.LookupBlockIndex(block.hash));
     if (!m_chainstate->m_blockman.ReadBlockUndo(block_undo, *pindex)) {
         return false;
     }
 
-    //point1 = std::chrono::high_resolution_clock::now();
-    //std::chrono::duration<double> duration2 = point1 - point2;
-
-     /* if (perf_stream.is_open()) {
-        perf_stream << "Timing of Rest: " << duration2.count() <<"\n";
-    } else {
-        std::cerr << "Error: log file is not open." << std::endl;
-    }*/
-
-    auto coreanalytics = CalculateASOPR(*block.data, block_undo, btc_price_map);
-    /* point2 = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> duration = point2 - point1;
-    if (perf_stream.is_open()) {
-        perf_stream << "Timing of CalculateASOPR: " << duration.count() <<"\n";
-    } else {
-        std::cerr << "Error: log file is not open." << std::endl;
-    }*/
+    if (!UpdatePriceMap(block)) {
+        return false;
+    }    
+    if (!ProcessTransactions(block, block_undo)) {
+        return false;
+    }
 
 
     if (!coreanalytics.has_value()) { return true; } //price missing, skip to next
@@ -153,6 +140,26 @@ bool CoreAnalytics::CustomAppend(const interfaces::BlockInfo& block)
 }
 
 BaseAnalytic::DB& CoreAnalytics::GetDB() const { return *m_db; }
+
+bool CoreAnalytics::UpdatePriceMap(const interfaces::BlockInfo& block)
+{
+    if (m_utxo_map.empty()) {
+        // Get price from db
+    } else {
+        AnalyticsRow new_row;
+        if (!GetDB().ReadAnalytics(new_row, {{"timestamp", "INTEGER"}, {"price", "REAL"}}, block.height)) {
+            LogError("%s: Could not read new price row of height %s", __func__, block.height);
+        }
+        UtxoMapEntry new_entry{
+            .timestamp = std::get<double>(new_row.second[0]),
+            .price = std::get<double>(new_row.second[1]),
+            .utxo_count = 0,
+            .utxo_amount = 0};
+        m_utxo_map[block.height] = new_entry;
+    }
+
+    return true;
+}
 
 bool CoreAnalytics::ProcessTransactions(const interfaces::BlockInfo& block, const CBlockUndo& blockUndo)
 {
@@ -225,6 +232,7 @@ bool CoreAnalytics::ProcessTransactions(const interfaces::BlockInfo& block, cons
 
     return true;
 }
+
 // TODO: Create loadbtcprices function to retrieve prices from db. Perhaps this function should retrieve other things too like count and total outputs etc
 std::unordered_map<int64_t, double> CoreAnalytics::LoadBTCPrices(const std::string& file_path){
     // Create a file reader

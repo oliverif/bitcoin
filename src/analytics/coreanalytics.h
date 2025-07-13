@@ -75,6 +75,8 @@ private:
     std::unordered_map<int64_t, UtxoMapEntry> m_utxo_map;
     CoreAnalyticsRow m_row;
     TempVars m_temp_vars;
+    double m_current_price;
+    uint64_t m_current_timestamp;
     std::ofstream log_stream;
     std::ofstream perf_stream;
 
@@ -85,9 +87,11 @@ private:
 
     bool AllowPrune() const override { return false; }
     std::unordered_map<int64_t, double> LoadBTCPrices(const std::string& file_path);
-    bool ProcessTransactions(const interfaces::BlockInfo& block, const CBlockUndo& blockUndo);
     bool UpdatePriceMap(const interfaces::BlockInfo& block);
-    bool CalculateUtxoMetrics();
+    bool ProcessTransactions(const interfaces::BlockInfo& block, const CBlockUndo& blockUndo);
+    bool PrepareStatistics(const interfaces::BlockInfo& block);
+    bool GetIndexData(const interfaces::BlockInfo& block);
+    bool CalculateUtxoMetrics(const interfaces::BlockInfo& block);
 
 
 
