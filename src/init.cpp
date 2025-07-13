@@ -1728,7 +1728,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     // ********************************************************* Step 8.5: start analytics
     //Init analytics here
     /* if (args.GetBoolArg("-asopr", DEFAULT_ASOPR)) {
-        g_asopr = std::make_unique<Asopr>(interfaces::MakeChain(node), gArgs.GetDataDirNet() / "analytics\\analytics.db");
+        g_asopr = std::make_unique<CoreAnalytics>(interfaces::MakeChain(node), gArgs.GetDataDirNet() / "analytics\\analytics.db");
         node.analytics.emplace_back(g_asopr.get());
     }*/
 

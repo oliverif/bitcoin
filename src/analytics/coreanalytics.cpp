@@ -2,7 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-#include <analytics/asopr.h>
+#include <analytics/coreanalytics.h>
 
 #include <clientversion.h>
 #include <common/args.h>
@@ -21,45 +21,45 @@
 
 
 
-std::unique_ptr<Asopr> g_asopr;
+std::unique_ptr<CoreAnalytics> g_coreanalytics;
 
 
 
 /** Access to the analytics database (analytics/) */
-class Asopr::DB : public BaseAnalytic::DB
+class CoreAnalytics::DB : public BaseAnalytic::DB
 {
 public:
     explicit DB(const fs::path& path, std::string column_name);
 
     /// Read the disk location of the transaction data with the given hash. Returns false if the
     /// transaction hash is not indexed.
-    //bool WriteAsopr(const std::pair<uint64_t,std::vector<double>>& vAsopr) const;
+    //bool WriteCoreAnalytics(const std::pair<uint64_t,std::vector<double>>& vCoreAnalytics) const;
 
     /// Write a batch of transaction positions to the DB.
-    [[nodiscard]] bool WriteAsopr(const AnalyticsRow& vAsopr);
+    [[nodiscard]] bool WriteCoreAnalytics(const AnalyticsRow& vCoreAnalytics);
 };
 
-Asopr::DB::DB(const fs::path& path, std::string column_name) :
+CoreAnalytics::DB::DB(const fs::path& path, std::string column_name) :
     BaseAnalytic::DB(
     StorageUtils::AnalyticStorageConfig{
-        .analytic_id = "asopr",
+        .analytic_id = "coreanalytics",
         .db_path = gArgs.GetDataDirNet() / "analytics" / "analytics.db ",
         .sqlite_db = nullptr,
         .table_name = "analytics",
-        .columns = {{"height", "PRIMARY INTEGER"}, {"asopr","REAL"}},  
+        .columns = {{"height", "PRIMARY INTEGER"}, {"coreanalytics","REAL"}},  
     })
 {}
 //gArgs.GetDataDirNet() "/analytics"
 
 
 
-bool Asopr::DB::WriteAsopr(const AnalyticsRow& vAsopr)
+bool CoreAnalytics::DB::WriteCoreAnalytics(const AnalyticsRow& vCoreAnalytics)
 {
-    return WriteAnalytics(vAsopr);
+    return WriteAnalytics(vCoreAnalytics);
 }
 
-Asopr::Asopr(std::unique_ptr<interfaces::Chain> chain, const fs::path& path)
-    : BaseAnalytic(std::move(chain), "asopr"), m_db(std::make_unique<Asopr::DB>(path,"asopr"))
+CoreAnalytics::CoreAnalytics(std::unique_ptr<interfaces::Chain> chain, const fs::path& path)
+    : BaseAnalytic(std::move(chain), "coreanalytics"), m_db(std::make_unique<CoreAnalytics::DB>(path,"coreanalytics"))
 {
     std::string csv_file_path = "C:\\Users\\Oliver\\Code\\CryptoTrader\\data\\block_prices_usd.csv";
     btc_price_map = LoadBTCPrices(csv_file_path);
@@ -68,14 +68,15 @@ Asopr::Asopr(std::unique_ptr<interfaces::Chain> chain, const fs::path& path)
     perf_stream = std::ofstream("D:/Code/bitcoin/performance_log.txt", std::ios::app);
 }
 
-Asopr::~Asopr(){
+CoreAnalytics::~CoreAnalytics(){
     perf_stream.close();
     log_stream.close();
     BaseAnalytic::~BaseAnalytic();
 }
 
-bool Asopr::CustomAppend(const interfaces::BlockInfo& block)
+bool CoreAnalytics::CustomAppend(const interfaces::BlockInfo& block)
 {
+    //TODO: add logic to make this analytic wait for ohlcvp
     // Exclude genesis block transaction because outputs are not spendable.
     if (block.height == 0) return true;
 
@@ -98,7 +99,7 @@ bool Asopr::CustomAppend(const interfaces::BlockInfo& block)
         std::cerr << "Error: log file is not open." << std::endl;
     }*/
 
-    auto asopr = CalculateASOPR(*block.data,block_undo, btc_price_map);
+    auto coreanalytics = CalculateASOPR(*block.data,block_undo, btc_price_map);
     /* point2 = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> duration = point2 - point1;
     if (perf_stream.is_open()) {
@@ -108,16 +109,18 @@ bool Asopr::CustomAppend(const interfaces::BlockInfo& block)
     }*/
     
 
-    if (!asopr.has_value()) { return true;} //price missing, skip to next
+    if (!coreanalytics.has_value()) { return true;} //price missing, skip to next
 
-    AnalyticsRow vAsopr = std::make_pair(blockTime, std::vector<std::variant<int64_t, double>>{asopr.value()}); 
+    AnalyticsRow vCoreAnalytics = std::make_pair(blockTime, std::vector<std::variant<int64_t, double>>{coreanalytics.value()}); 
 
-    return m_db->WriteAsopr(vAsopr);
+    return m_db->WriteCoreAnalytics(vCoreAnalytics);
 }
 
-BaseAnalytic::DB& Asopr::GetDB() const { return *m_db; }
+BaseAnalytic::DB& CoreAnalytics::GetDB() const { return *m_db; }
 
-std::optional<double> Asopr::CalculateASOPR(const CBlock& block, const CBlockUndo& blockUndo, const std::unordered_map<int64_t, double>& btc_price_map) {
+std::optional<double> CoreAnalytics::ProcessTransactions(const CBlock& block, const CBlockUndo& blockUndo)
+{
+    //TODO: Add calculations for the other stuff that needs to be calculated in the loop. Change name of function
     double total_transaction_btc = 0;
     double total_created_usd = 0;
     uint64_t blocktime = block.GetBlockTime();
@@ -176,8 +179,8 @@ std::optional<double> Asopr::CalculateASOPR(const CBlock& block, const CBlockUnd
 
     return static_cast<double>(total_transaction_btc * *block_price) / total_created_usd;
 }
-
-std::unordered_map<int64_t, double> Asopr::LoadBTCPrices(const std::string& file_path){
+// TODO: Create loadbtcprices function to retrieve prices from db. Perhaps this function should retrieve other things too like count and total outputs etc
+std::unordered_map<int64_t, double> CoreAnalytics::LoadBTCPrices(const std::string& file_path){
     // Create a file reader
     auto file_result = arrow::io::ReadableFile::Open(file_path);
     if (!file_result.ok()) {
@@ -229,7 +232,7 @@ std::unordered_map<int64_t, double> Asopr::LoadBTCPrices(const std::string& file
     return btc_price_map;
 }
 
-std::optional<double> Asopr::GetBTCPrice(const std::unordered_map<int64_t, double>& btc_price_map, 
+std::optional<double> CoreAnalytics::GetBTCPrice(const std::unordered_map<int64_t, double>& btc_price_map, 
                                   int64_t timestamp, 
                                   std::ofstream& log_stream) {
 
@@ -251,7 +254,7 @@ std::optional<double> Asopr::GetBTCPrice(const std::unordered_map<int64_t, doubl
     return std::nullopt;  // Indicate that no price was found
 }
 
-std::unordered_map<int64_t, double> Asopr::ConvertTableToMap(const std::shared_ptr<arrow::Table>& table) {
+std::unordered_map<int64_t, double> CoreAnalytics::ConvertTableToMap(const std::shared_ptr<arrow::Table>& table) {
     auto timestamp_column = table->column(0);
     auto price_column = table->column(1);
 
@@ -270,3 +273,4 @@ std::unordered_map<int64_t, double> Asopr::ConvertTableToMap(const std::shared_p
 
     return btc_price_map;
 }
+//TODO: Create functions from pseudocode

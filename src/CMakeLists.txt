@@ -196,7 +196,7 @@ endif()
 # P2P and RPC server functionality used by `bitcoind` and `bitcoin-qt` executables.
 add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   analytics/baseanalytic.cpp
-  analytics/asopr.cpp
+  "analytics/coreanalytics.cpp"
   analytics/ohlcvp.cpp
   addrdb.cpp
   addrman.cpp

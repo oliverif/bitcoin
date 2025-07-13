@@ -221,7 +221,7 @@ bool Ohlcvp::GetKlines(const interfaces::BlockInfo& block, AnalyticsRow& new_row
     int64_t max_duration = 1000 * interval_ms;
 
     // Copy previous row if same timestamp
-    if (end_timestamp == start_timestamp || (end_timestamp - start_timestamp) < interval_ms) {
+    if (end_timestamp == start_timestamp || (request_end - request_start) < interval_ms) {
         if (!GetDB().WriteAnalytics(new_row)) {
             LogError("%s: Could not copy previous row\n", __func__);
             return false;
