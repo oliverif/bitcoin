@@ -441,7 +441,16 @@ bool BaseAnalytic::Commit()
     // (this could happen if init is interrupted).
     bool ok = m_best_block_index != nullptr;
     if (ok) {
+        CBlockLocator prev_commited;
+        if (!GetDB().ReadBestBlock(prev_commited)) {
+            return false;
+        }
         GetDB().WriteBestBlock(GetLocator(*m_chain, m_best_block_index.load()->GetBlockHash()));
+        if (!CustomCommit()) {
+            //Rewind best block if CustomCommit fails
+            GetDB().WriteBestBlock(prev_commited);
+            return false;
+        }
     }
     if (!ok) {
         LogError("%s: Failed to commit latest %s state\n", __func__, GetName());

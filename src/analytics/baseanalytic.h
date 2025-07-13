@@ -137,7 +137,7 @@ protected:
 
     /// Virtual method called internally by Commit that can be overridden to atomically
     /// commit more index state.
-    virtual bool CustomCommit(CDBBatch& batch) { return true; }
+    virtual bool CustomCommit() { return true; }
 
     /// Rewind index to an earlier chain tip during a chain reorg. The tip must
     /// be an ancestor of the current best block.

@@ -17,6 +17,54 @@ static constexpr bool DEFAULT_COREANALYTICS{false};
  * The index is written to a LevelDB database and records the filesystem
  * location of each transaction by transaction hash.
  */
+struct CoreAnalyticsRow {
+    int64_t height;
+    double issuance;
+    double transaction_fees;
+    double miner_revenue;
+    double puell_multiple;
+    double bdd;
+    double asopr;
+    double rc;
+    double rp;
+    double rl;
+    double nrpl;
+    double rplr;
+    double cs;
+    double mc;
+    double mvrv;
+    double mvrv_z;
+    double realized_price;
+    double rpv_ratio;
+    double utxos_in_loss;
+    double utxos_in_profit;
+    double percent_utxos_in_profit;
+    double percent_supply_in_profit;
+    double total_supply_in_loss;
+    double total_supply_in_profit;
+    double ul;
+    double up;
+    double rul;
+    double rup;
+    double abdd;
+    double vocd;
+    double mvocd;
+    double hodl_bank;
+    double reserve_risk;
+    double ath;
+    double dfath;
+};
+struct TempVars {
+    int64_t inputs;
+};
+
+struct UtxoMapEntry {
+    uint64_t timestamp;
+    double price;
+    int64_t utxo_count;
+    double utxo_amount;
+};
+
 class CoreAnalytics final : public BaseAnalytic
 {
 protected:
@@ -24,8 +72,9 @@ protected:
 
 private:
     const std::unique_ptr<DB> m_db;
-    std::unordered_map<int64_t, std::pair<int64_t, double>> btc_price_map;
-    std::unordered_map<int64_t, std::pair<int64_t, double>> utxo_distribution_map;
+    std::unordered_map<int64_t, UtxoMapEntry> m_utxo_map;
+    CoreAnalyticsRow m_row;
+    TempVars m_temp_vars;
     std::ofstream log_stream;
     std::ofstream perf_stream;
 
@@ -36,14 +85,16 @@ private:
 
     bool AllowPrune() const override { return false; }
     std::unordered_map<int64_t, double> LoadBTCPrices(const std::string& file_path);
-    bool ProcessTransactions(const CBlock& block, const CBlockUndo& blockUndo);
+    bool ProcessTransactions(const interfaces::BlockInfo& block, const CBlockUndo& blockUndo);
     bool UpdatePriceMap(const interfaces::BlockInfo& block);
+    bool CalculateUtxoMetrics();
+
 
 
 
 protected:
     bool CustomAppend(const interfaces::BlockInfo& block) override;
-
+    bool CustomCommit() override; //Needs to update utxo distribution map
     BaseAnalytic::DB& GetDB() const override;
 
 public:

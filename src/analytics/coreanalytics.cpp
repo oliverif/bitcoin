@@ -36,7 +36,7 @@ public:
     //bool WriteCoreAnalytics(const std::pair<uint64_t,std::vector<double>>& vCoreAnalytics) const;
 
     /// Write a batch of transaction positions to the DB.
-    [[nodiscard]] bool WriteCoreAnalytics(const AnalyticsRow& vCoreAnalytics);
+    [[nodiscard]] bool WriteCoreAnalytics(const CoreAnalyticsRow& coreAnalyticsRow);
 };
 
 CoreAnalytics::DB::DB(const fs::path& path, std::string column_name) :
@@ -53,13 +53,49 @@ CoreAnalytics::DB::DB(const fs::path& path, std::string column_name) :
 
 
 
-bool CoreAnalytics::DB::WriteCoreAnalytics(const AnalyticsRow& vCoreAnalytics)
+bool CoreAnalytics::DB::WriteCoreAnalytics(const CoreAnalyticsRow& coreAnalyticsRow)
 {
-    return WriteAnalytics(vCoreAnalytics);
+    std::vector<std::variant<int64_t, double>> vals = {
+        coreAnalyticsRow.issuance,
+        coreAnalyticsRow.transaction_fees,
+        coreAnalyticsRow.miner_revenue,
+        coreAnalyticsRow.puell_multiple,
+        coreAnalyticsRow.bdd,
+        coreAnalyticsRow.asopr,
+        coreAnalyticsRow.rc,
+        coreAnalyticsRow.rp,
+        coreAnalyticsRow.rl,
+        coreAnalyticsRow.nrpl,
+        coreAnalyticsRow.rplr,
+        coreAnalyticsRow.cs,
+        coreAnalyticsRow.mc,
+        coreAnalyticsRow.mvrv,
+        coreAnalyticsRow.mvrv_z,
+        coreAnalyticsRow.realized_price,
+        coreAnalyticsRow.rpv_ratio,
+        coreAnalyticsRow.utxos_in_loss,
+        coreAnalyticsRow.utxos_in_profit,
+        coreAnalyticsRow.percent_utxos_in_profit,
+        coreAnalyticsRow.percent_supply_in_profit,
+        coreAnalyticsRow.total_supply_in_loss,
+        coreAnalyticsRow.total_supply_in_profit,
+        coreAnalyticsRow.ul,
+        coreAnalyticsRow.up,
+        coreAnalyticsRow.rul,
+        coreAnalyticsRow.rup,
+        coreAnalyticsRow.abdd,
+        coreAnalyticsRow.vocd,
+        coreAnalyticsRow.mvocd,
+            coreAnalyticsRow.hodl_bank,
+            coreAnalyticsRow.reserve_risk,
+            coreAnalyticsRow.ath,
+            coreAnalyticsRow.dfath};
+            AnalyticsRow row = { coreAnalyticsRow.height, vals };
+            return WriteAnalytics(row);
 }
 
 CoreAnalytics::CoreAnalytics(std::unique_ptr<interfaces::Chain> chain, const fs::path& path)
-    : BaseAnalytic(std::move(chain), "coreanalytics"), m_db(std::make_unique<CoreAnalytics::DB>(path,"coreanalytics"))
+    : BaseAnalytic(std::move(chain), "coreanalytics"), m_db(std::make_unique<CoreAnalytics::DB>(path, "coreanalytics"))
 {
     std::string csv_file_path = "C:\\Users\\Oliver\\Code\\CryptoTrader\\data\\block_prices_usd.csv";
     btc_price_map = LoadBTCPrices(csv_file_path);
@@ -68,7 +104,7 @@ CoreAnalytics::CoreAnalytics(std::unique_ptr<interfaces::Chain> chain, const fs:
     perf_stream = std::ofstream("D:/Code/bitcoin/performance_log.txt", std::ios::app);
 }
 
-CoreAnalytics::~CoreAnalytics(){
+CoreAnalytics::~CoreAnalytics() {
     perf_stream.close();
     log_stream.close();
     BaseAnalytic::~BaseAnalytic();
@@ -92,14 +128,14 @@ bool CoreAnalytics::CustomAppend(const interfaces::BlockInfo& block)
 
     //point1 = std::chrono::high_resolution_clock::now();
     //std::chrono::duration<double> duration2 = point1 - point2;
-    
+
      /* if (perf_stream.is_open()) {
         perf_stream << "Timing of Rest: " << duration2.count() <<"\n";
     } else {
         std::cerr << "Error: log file is not open." << std::endl;
     }*/
 
-    auto coreanalytics = CalculateASOPR(*block.data,block_undo, btc_price_map);
+    auto coreanalytics = CalculateASOPR(*block.data, block_undo, btc_price_map);
     /* point2 = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> duration = point2 - point1;
     if (perf_stream.is_open()) {
@@ -107,77 +143,87 @@ bool CoreAnalytics::CustomAppend(const interfaces::BlockInfo& block)
     } else {
         std::cerr << "Error: log file is not open." << std::endl;
     }*/
-    
 
-    if (!coreanalytics.has_value()) { return true;} //price missing, skip to next
 
-    AnalyticsRow vCoreAnalytics = std::make_pair(blockTime, std::vector<std::variant<int64_t, double>>{coreanalytics.value()}); 
+    if (!coreanalytics.has_value()) { return true; } //price missing, skip to next
+
+    AnalyticsRow vCoreAnalytics = std::make_pair(blockTime, std::vector<std::variant<int64_t, double>>{coreanalytics.value()});
 
     return m_db->WriteCoreAnalytics(vCoreAnalytics);
 }
 
 BaseAnalytic::DB& CoreAnalytics::GetDB() const { return *m_db; }
 
-std::optional<double> CoreAnalytics::ProcessTransactions(const CBlock& block, const CBlockUndo& blockUndo)
+bool CoreAnalytics::ProcessTransactions(const interfaces::BlockInfo& block, const CBlockUndo& blockUndo)
 {
     //TODO: Add calculations for the other stuff that needs to be calculated in the loop. Change name of function
-    double total_transaction_btc = 0;
-    double total_created_usd = 0;
-    uint64_t blocktime = block.GetBlockTime();
-    bool priceMissing = false;
-    CChain& cChain = m_chainstate->m_chainman.ActiveChain();
+    m_row.bdd = 0;
+    m_row.rp = 0;
+    m_row.rl = 0;
+    m_temp_vars.inputs = 0;
+    double previous_utxo_value = 0;
+    double new_utxo_amount = 0;
+    uint64_t current_timestamp;
+    double current_price;
+    {
+        auto it = m_utxo_map.find(block.height);
+        if (it != m_utxo_map.end()) {
+            LogError("%s: Price not available for block with height %s", __func__, prev_coin.nHeight);
+            return false;
+        }
+        current_timestamp = it->second.timestamp;
+        current_price = it->second.price;
+    }
 
-    for (const CTransactionRef& tx : block.vtx) {
+
+    for (const CTransactionRef& tx : block.data->vtx) {
         if (tx->IsCoinBase()) {
             continue; // Skip coinbase transactions
         }
-        const CTxUndo* undoTX {nullptr};
-        auto it = std::find_if(block.vtx.begin(), block.vtx.end(), [tx](CTransactionRef t){ return *t == *tx; });
-        if (it != block.vtx.end()) {
+        m_temp_vars.inputs += tx->vin.size();
+        const CTxUndo* undoTX{ nullptr };
+        auto it = std::find_if(block.data->vtx.begin(), block.data->vtx.end(), [tx](CTransactionRef t) { return *t == *tx; });
+        if (it != block.data->vtx.end()) {
             // -1 as blockundo does not have coinbase tx
-            undoTX = &blockUndo.vtxundo.at(it - block.vtx.begin() - 1);
+            undoTX = &blockUndo.vtxundo.at(it - block.data->vtx.begin() - 1);
         }
         // Calculate total input value for the transaction
         for (unsigned int i = 0; i < tx->vin.size(); i++) {
             const CTxIn& txin = tx->vin[i];
             const Coin& prev_coin = undoTX->vprevout[i];
-            uint64_t vin_timestamp = cChain[prev_coin.nHeight]->GetBlockTime();
-
-            if(blocktime - vin_timestamp < 3600){ //skip transactions shorter than an hour
-                continue;
-            }
-
-            
             const CTxOut& prev_txout = prev_coin.out;
-            double btc_val = ValueFromAmount(prev_txout.nValue).get_real();
-            total_transaction_btc += btc_val;
-            auto price = GetBTCPrice(btc_price_map,vin_timestamp,log_stream);
-            if (price){
-                total_created_usd += btc_val * *price;
+            double btc_amount = ValueFromAmount(prev_txout.nValue).get_real();
+
+            auto it = m_utxo_map.find(prev_coin.nHeight);
+            if (it != m_utxo_map.end()){
+                LogError("%s: Price not available for block with height %s", __func__, prev_coin.nHeight);
+                return false;
             }
-            else{
-                priceMissing = true;
+            auto& utxo_entry = it->second;
+            if (current_timestamp - utxo_entry.timestamp > 3600) { // skip transactions shorter than an hour    
+                previous_utxo_value += btc_amount * utxo_entry.price;
+                new_utxo_amount += btc_amount;
             }
-            
+
+            m_row.bdd += btc_amount * static_cast<double>(current_timestamp - utxo_entry.timestamp) / 86400.0;
+
+            if (current_price > utxo_entry.price) {
+                m_row.rp += btc_amount * (current_price - utxo_entry.price);
+            }
+            else {
+                m_row.rl += btc_amount * (utxo_entry.price - current_price);
+            }
+
+            utxo_entry.utxo_amount -= btc_amount;
+            --utxo_entry.utxo_count;
+           
         }
     }
-    auto block_price = GetBTCPrice(btc_price_map,blocktime,log_stream);
-    if (!block_price || priceMissing){
-        return std::nullopt;
-    }
 
-    // Avoid division by zero
-    if (total_created_usd == 0) {
-        if (log_stream.is_open()) {
-            log_stream << "Total created: " + std::to_string(total_created_usd) << "\n";  // Append missing timestamp
-        } else {
-            std::cerr << "Error: log file is not open." << std::endl;
-        }
-        return 0.0;
-    }
+    m_row.nrpl = m_row.rp - m_row.rl;
+    m_row.rplr = m_row.rp / m_row.rl;
 
-
-    return static_cast<double>(total_transaction_btc * *block_price) / total_created_usd;
+    return true;
 }
 // TODO: Create loadbtcprices function to retrieve prices from db. Perhaps this function should retrieve other things too like count and total outputs etc
 std::unordered_map<int64_t, double> CoreAnalytics::LoadBTCPrices(const std::string& file_path){
