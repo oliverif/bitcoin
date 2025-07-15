@@ -95,6 +95,8 @@ private:
     bool PrepareStatistics(const interfaces::BlockInfo& block);
     bool GetIndexData(const interfaces::BlockInfo& block);
     bool CalculateUtxoMetrics(const interfaces::BlockInfo& block);
+    bool UpdateMeanVars(const interfaces::BlockInfo& block);
+    uint64_t GetHeightFromTimestamp(uint64_t timestamp);
 
 
 

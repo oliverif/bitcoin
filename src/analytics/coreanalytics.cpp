@@ -136,10 +136,18 @@ bool CoreAnalytics::CustomAppend(const interfaces::BlockInfo& block)
     if (!CalculateUtxoMetrics(block)) {
         return false;
     }
+    if (!PrepareStatistics(block)) {
+        return false;
+    }
     m_row.mc = m_row.cs * m_current_price;
     m_utxo_map[block.height].utxo_count = m_temp_vars.delta_ntransaction_outputs + m_temp_vars.inputs;
     m_utxo_map[block.height].utxo_amount = m_temp_vars.spendable_out;
-    m_row.rc = m_row.rc + m_temp_vars.spendable_out*m_current_price - 
+    m_row.rc = m_row.rc + m_temp_vars.spendable_out * m_current_price - m_temp_vars.previous_utxo_value;
+    m_row.mvrv = m_row.mc / m_row.rc;
+
+    if (!UpdateMeanVars(block)) {
+        return false;
+    }
 
     if (!coreanalytics.has_value()) { return true; } //price missing, skip to next
 
@@ -243,6 +251,24 @@ bool CoreAnalytics::ProcessTransactions(const interfaces::BlockInfo& block, cons
     m_row.rplr = m_row.rp / m_row.rl;
 
     return true;
+}
+
+bool CoreAnalytics::UpdateMeanVars(const interfaces::BlockInfo& block)
+{
+    auto 
+    return false;
+}
+
+uint64_t CoreAnalytics::GetHeightFromTimestamp(uint64_t timestamp, uint64_t current_height)
+{
+    auto start = current_height- 52560; //assuming new block every 10th minute, we start the search from now - 52560 blocks
+    auto iteration_direction = 1;
+    if (m_utxo_map[start].timestamp > timestamp) {
+        iteration_direction = -1;
+    }
+    
+
+    return 0;
 }
 
 // TODO: Create loadbtcprices function to retrieve prices from db. Perhaps this function should retrieve other things too like count and total outputs etc
