@@ -56,6 +56,9 @@ struct CoreAnalyticsRow {
 };
 struct TempVars {
     int64_t inputs;
+    double spendable_out;
+    int64_t delta_ntransaction_outputs;
+    double previous_utxo_value;
 };
 
 struct UtxoMapEntry {

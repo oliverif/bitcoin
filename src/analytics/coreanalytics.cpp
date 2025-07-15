@@ -130,7 +130,16 @@ bool CoreAnalytics::CustomAppend(const interfaces::BlockInfo& block)
     if (!ProcessTransactions(block, block_undo)) {
         return false;
     }
-
+    if (!GetIndexData(block)) {
+        return false;
+    }
+    if (!CalculateUtxoMetrics(block)) {
+        return false;
+    }
+    m_row.mc = m_row.cs * m_current_price;
+    m_utxo_map[block.height].utxo_count = m_temp_vars.delta_ntransaction_outputs + m_temp_vars.inputs;
+    m_utxo_map[block.height].utxo_amount = m_temp_vars.spendable_out;
+    m_row.rc = m_row.rc + m_temp_vars.spendable_out*m_current_price - 
 
     if (!coreanalytics.has_value()) { return true; } //price missing, skip to next
 
@@ -168,8 +177,10 @@ bool CoreAnalytics::ProcessTransactions(const interfaces::BlockInfo& block, cons
     m_row.rp = 0;
     m_row.rl = 0;
     m_temp_vars.inputs = 0;
-    double previous_utxo_value = 0;
-    double new_utxo_amount = 0;
+    m_temp_vars.previous_utxo_value = 0;
+    double previous_adjusted_utxo_value = 0;
+    double new_adjusted_utxo_amount = 0;
+    double young_coins = 0;
     uint64_t current_timestamp;
     double current_price;
     {
@@ -207,10 +218,11 @@ bool CoreAnalytics::ProcessTransactions(const interfaces::BlockInfo& block, cons
                 return false;
             }
             auto& utxo_entry = it->second;
-            if (current_timestamp - utxo_entry.timestamp > 3600) { // skip transactions shorter than an hour    
-                previous_utxo_value += btc_amount * utxo_entry.price;
-                new_utxo_amount += btc_amount;
+            if (current_timestamp - utxo_entry.timestamp > 3600) { // skip transactions shorter than an hour
+                previous_adjusted_utxo_value += btc_amount * utxo_entry.price;
+                new_adjusted_utxo_amount += btc_amount;
             }
+            m_temp_vars.previous_utxo_value += btc_amount * utxo_entry.price;
 
             m_row.bdd += btc_amount * static_cast<double>(current_timestamp - utxo_entry.timestamp) / 86400.0;
 
