@@ -9,9 +9,10 @@
 #include <fstream>
 #include <chrono>
 #include <arrow/table.h>
+#include <index/coinstatsindex.h>
+#include <kernel/coinstats.h>
 
 static constexpr bool DEFAULT_COREANALYTICS{false};
-
 /**
  * TxIndex is used to look up transactions included in the blockchain by hash.
  * The index is written to a LevelDB database and records the filesystem
@@ -59,6 +60,11 @@ struct TempVars {
     double spendable_out;
     int64_t delta_ntransaction_outputs;
     double previous_utxo_value;
+    CAmount previous_total_new_out;
+    CAmount previous_total_coinbase_amount;
+    uint64_t previous_nTransactionOutputs;
+    double coinbase_amount;
+    CAmount prev_total_coinbase_amount;
 };
 
 struct UtxoMapEntry {
@@ -80,6 +86,7 @@ private:
     TempVars m_temp_vars;
     double m_current_price;
     uint64_t m_current_timestamp;
+    uint64_t m_current_height;
     std::ofstream log_stream;
     std::ofstream perf_stream;
 
@@ -90,10 +97,10 @@ private:
 
     bool AllowPrune() const override { return false; }
     std::unordered_map<int64_t, double> LoadBTCPrices(const std::string& file_path);
-    bool UpdatePriceMap(const interfaces::BlockInfo& block);
+    bool UpdatePriceMap();
     bool ProcessTransactions(const interfaces::BlockInfo& block, const CBlockUndo& blockUndo);
     bool PrepareStatistics(const interfaces::BlockInfo& block);
-    bool GetIndexData(const interfaces::BlockInfo& block);
+    bool GetIndexData(const interfaces::BlockInfo& block, const CBlockIndex& block_index);
     bool CalculateUtxoMetrics(const interfaces::BlockInfo& block);
     bool UpdateMeanVars(const interfaces::BlockInfo& block);
     uint64_t GetHeightFromTimestamp(uint64_t timestamp);

@@ -3,7 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <analytics/coreanalytics.h>
-
+#include <chainparams.h>
 #include <clientversion.h>
 #include <common/args.h>
 #include <core_io.h>
@@ -18,11 +18,11 @@
 #include <arrow/type.h>
 #include <undo.h>
 #include <univalue.h>
-
-
+#include <index/coinstatsindex.h>
+#include <kernel/coinstats.h>
 
 std::unique_ptr<CoreAnalytics> g_coreanalytics;
-
+using kernel::CCoinsStats;
 
 
 /** Access to the analytics database (analytics/) */
@@ -123,14 +123,16 @@ bool CoreAnalytics::CustomAppend(const interfaces::BlockInfo& block)
     if (!m_chainstate->m_blockman.ReadBlockUndo(block_undo, *pindex)) {
         return false;
     }
+    m_current_height = block.height;
+    m_row.issuance = ValueFromAmount(GetBlockSubsidy(m_current_height, Params().GetConsensus())).get_real();
 
-    if (!UpdatePriceMap(block)) {
+    if (!UpdatePriceMap()) {
         return false;
     }    
     if (!ProcessTransactions(block, block_undo)) {
         return false;
     }
-    if (!GetIndexData(block)) {
+    if (!GetIndexData(block, *pindex)) {
         return false;
     }
     if (!CalculateUtxoMetrics(block)) {
@@ -158,21 +160,23 @@ bool CoreAnalytics::CustomAppend(const interfaces::BlockInfo& block)
 
 BaseAnalytic::DB& CoreAnalytics::GetDB() const { return *m_db; }
 
-bool CoreAnalytics::UpdatePriceMap(const interfaces::BlockInfo& block)
+bool CoreAnalytics::UpdatePriceMap()
 {
     if (m_utxo_map.empty()) {
         // Get price from db
     } else {
         AnalyticsRow new_row;
-        if (!GetDB().ReadAnalytics(new_row, {{"timestamp", "INTEGER"}, {"price", "REAL"}}, block.height)) {
-            LogError("%s: Could not read new price row of height %s", __func__, block.height);
+        if (!GetDB().ReadAnalytics(new_row, {{"timestamp", "INTEGER"}, {"price", "REAL"}}, m_current_height)) {
+            LogError("%s: Could not read new price row of height %s", __func__, m_current_height);
         }
         UtxoMapEntry new_entry{
             .timestamp = std::get<double>(new_row.second[0]),
             .price = std::get<double>(new_row.second[1]),
             .utxo_count = 0,
             .utxo_amount = 0};
-        m_utxo_map[block.height] = new_entry;
+        m_utxo_map[m_current_height] = new_entry;
+        m_current_price = new_entry.price;
+        m_current_timestamp = new_entry.timestamp;
     }
 
     return true;
@@ -253,13 +257,67 @@ bool CoreAnalytics::ProcessTransactions(const interfaces::BlockInfo& block, cons
     return true;
 }
 
+bool CoreAnalytics::PrepareStatistics(const interfaces::BlockInfo& block)
+{
+    return false;
+}
+
+bool CoreAnalytics::GetIndexData(const interfaces::BlockInfo& block, const CBlockIndex& block_index)
+{
+    const std::optional<CCoinsStats> maybe_coin_stats = g_coin_stats_index->LookUpStats(block_index);
+    if (!maybe_coin_stats.has_value()) {
+        LogError("%s: Index data not yet available", __func__);
+        return false;
+    }
+    const CCoinsStats& coin_stats = maybe_coin_stats.value();
+    m_temp_vars.spendable_out = ValueFromAmount(coin_stats.total_new_outputs_ex_coinbase_amount - m_temp_vars.previous_total_new_out + coin_stats.total_coinbase_amount - m_temp_vars.previous_total_coinbase_amount).get_real();
+    m_temp_vars.previous_total_new_out = coin_stats.total_new_outputs_ex_coinbase_amount;
+    m_temp_vars.previous_total_coinbase_amount = coin_stats.total_coinbase_amount;
+
+    m_temp_vars.delta_ntransaction_outputs = coin_stats.nTransactionOutputs - m_temp_vars.previous_nTransactionOutputs;
+    m_temp_vars.previous_nTransactionOutputs = coin_stats.nTransactionOutputs;
+
+    m_temp_vars.coinbase_amount = ValueFromAmount(coin_stats.total_coinbase_amount - m_temp_vars.prev_total_coinbase_amount).get_real();
+    m_temp_vars.prev_total_coinbase_amount = coin_stats.total_coinbase_amount;
+    
+    return true;
+}
+
+bool CoreAnalytics::CalculateUtxoMetrics(const interfaces::BlockInfo& block)
+{
+    m_row.ul = 0;
+    m_row.up = 0;
+    m_row.utxos_in_loss = 0;
+    m_row.utxos_in_profit = 0;
+    m_row.total_supply_in_loss = 0;
+    m_row.total_supply_in_profit = 0;
+
+    for (const auto& entry : m_utxo_map) {
+
+        if (entry.second.utxo_amount == 0) {
+            continue;
+        }
+        if (entry.second.price < m_current_price) {
+            m_row.utxos_in_loss += entry.second.utxo_count;
+            m_row.total_supply_in_loss += entry.second.utxo_amount;
+            m_row.ul += entry.second.utxo_amount * entry.second.price;
+        } else if (entry.second.price > m_current_price) {
+            m_row.utxos_in_profit += entry.second.utxo_count;
+            m_row.total_supply_in_profit += entry.second.utxo_amount;
+            m_row.up += entry.second.utxo_amount * entry.second.price;
+        }
+    }
+
+    return true;
+}
+
 bool CoreAnalytics::UpdateMeanVars(const interfaces::BlockInfo& block)
 {
     auto 
     return false;
 }
 
-uint64_t CoreAnalytics::GetHeightFromTimestamp(uint64_t timestamp, uint64_t current_height)
+uint64_t CoreAnalytics::GetHeightAfterTimestamp(uint64_t timestamp, uint64_t current_height)
 {
     auto start = current_height- 52560; //assuming new block every 10th minute, we start the search from now - 52560 blocks
     auto iteration_direction = 1;
