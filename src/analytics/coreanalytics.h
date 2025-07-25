@@ -65,6 +65,10 @@ struct TempVars {
     uint64_t previous_nTransactionOutputs;
     double coinbase_amount;
     CAmount prev_total_coinbase_amount;
+    RunningStats mvrv_stats;
+    RunningStats miner_rev_stats;
+    double prev_ath;
+    double prev_hodl_bank;
 };
 
 struct UtxoMapEntry {
@@ -73,6 +77,22 @@ struct UtxoMapEntry {
     int64_t utxo_count;
     double utxo_amount;
 };
+
+struct RunningStats {
+    int n = 0;
+    double mean = 0.0;
+    double M2 = 0.0; // Sum of squared diffs from the mean
+
+    void init_from_data(const std::vector<double>& data);
+    void add(double x);
+    void remove(const std::vector<double>& xs);
+    double variance() const;
+};
+
+struct RunningMedian {
+    std::multiset<double> window;
+    std::multiset<double>::iterator median_it;
+
 
 class CoreAnalytics final : public BaseAnalytic
 {
@@ -103,8 +123,8 @@ private:
     bool GetIndexData(const interfaces::BlockInfo& block, const CBlockIndex& block_index);
     bool CalculateUtxoMetrics(const interfaces::BlockInfo& block);
     bool UpdateMeanVars(const interfaces::BlockInfo& block);
-    uint64_t GetHeightFromTimestamp(uint64_t timestamp);
-
+    uint64_t GetHeightAfterTimestamp(uint64_t timestamp);
+    bool UpdateVocdMedian();
 
 
 

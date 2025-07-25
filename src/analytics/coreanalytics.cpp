@@ -138,9 +138,6 @@ bool CoreAnalytics::CustomAppend(const interfaces::BlockInfo& block)
     if (!CalculateUtxoMetrics(block)) {
         return false;
     }
-    if (!PrepareStatistics(block)) {
-        return false;
-    }
     m_row.mc = m_row.cs * m_current_price;
     m_utxo_map[block.height].utxo_count = m_temp_vars.delta_ntransaction_outputs + m_temp_vars.inputs;
     m_utxo_map[block.height].utxo_amount = m_temp_vars.spendable_out;
@@ -151,7 +148,17 @@ bool CoreAnalytics::CustomAppend(const interfaces::BlockInfo& block)
         return false;
     }
 
-    if (!coreanalytics.has_value()) { return true; } //price missing, skip to next
+    m_row.rul = m_row.ul / m_row.mc;
+    m_row.rup = m_row.up / m_row.mc;
+    m_row.abdd = m_row.bdd / m_row.cs;
+    m_row.vocd = m_row.abdd * m_current_price;
+
+    if (!UpdateVocdMedian()) {
+        return false;
+    }
+
+
+
 
     AnalyticsRow vCoreAnalytics = std::make_pair(blockTime, std::vector<std::variant<int64_t, double>>{coreanalytics.value()});
 
@@ -164,6 +171,7 @@ bool CoreAnalytics::UpdatePriceMap()
 {
     if (m_utxo_map.empty()) {
         // Get price from db
+        // and set ath to last
     } else {
         AnalyticsRow new_row;
         if (!GetDB().ReadAnalytics(new_row, {{"timestamp", "INTEGER"}, {"price", "REAL"}}, m_current_height)) {
@@ -177,6 +185,8 @@ bool CoreAnalytics::UpdatePriceMap()
         m_utxo_map[m_current_height] = new_entry;
         m_current_price = new_entry.price;
         m_current_timestamp = new_entry.timestamp;
+        m_row.ath = std::max(m_row.ath, m_current_price);
+        m_row.dfath = (m_current_price - m_row.ath) / m_row.ath;
     }
 
     return true;
@@ -257,11 +267,6 @@ bool CoreAnalytics::ProcessTransactions(const interfaces::BlockInfo& block, cons
     return true;
 }
 
-bool CoreAnalytics::PrepareStatistics(const interfaces::BlockInfo& block)
-{
-    return false;
-}
-
 bool CoreAnalytics::GetIndexData(const interfaces::BlockInfo& block, const CBlockIndex& block_index)
 {
     const std::optional<CCoinsStats> maybe_coin_stats = g_coin_stats_index->LookUpStats(block_index);
@@ -271,15 +276,21 @@ bool CoreAnalytics::GetIndexData(const interfaces::BlockInfo& block, const CBloc
     }
     const CCoinsStats& coin_stats = maybe_coin_stats.value();
     m_temp_vars.spendable_out = ValueFromAmount(coin_stats.total_new_outputs_ex_coinbase_amount - m_temp_vars.previous_total_new_out + coin_stats.total_coinbase_amount - m_temp_vars.previous_total_coinbase_amount).get_real();
+    m_temp_vars.coinbase_amount = ValueFromAmount(coin_stats.total_coinbase_amount - m_temp_vars.previous_total_coinbase_amount).get_real();
+
     m_temp_vars.previous_total_new_out = coin_stats.total_new_outputs_ex_coinbase_amount;
     m_temp_vars.previous_total_coinbase_amount = coin_stats.total_coinbase_amount;
 
     m_temp_vars.delta_ntransaction_outputs = coin_stats.nTransactionOutputs - m_temp_vars.previous_nTransactionOutputs;
     m_temp_vars.previous_nTransactionOutputs = coin_stats.nTransactionOutputs;
 
-    m_temp_vars.coinbase_amount = ValueFromAmount(coin_stats.total_coinbase_amount - m_temp_vars.prev_total_coinbase_amount).get_real();
-    m_temp_vars.prev_total_coinbase_amount = coin_stats.total_coinbase_amount;
-    
+    m_row.miner_revenue = m_temp_vars.coinbase_amount * m_current_price;
+
+    if (!coin_stats.total_amount.has_value()) {
+        LogError("s%: Total amount does not have value for height s%", __func__, m_current_height);
+    }
+    m_row.cs = ValueFromAmount(coin_stats.total_amount.value()).get_real();
+
     return true;
 }
 
@@ -313,20 +324,93 @@ bool CoreAnalytics::CalculateUtxoMetrics(const interfaces::BlockInfo& block)
 
 bool CoreAnalytics::UpdateMeanVars(const interfaces::BlockInfo& block)
 {
-    auto 
-    return false;
+    auto start_height = GetHeightAfterTimestamp(m_current_timestamp - 31536000);
+    auto prev_start_height = GetHeightAfterTimestamp(m_utxo_map[std::max((int)m_current_height - 1,0)].timestamp - 31536000);
+    std::vector<uint64_t> heights_to_remove;
+    for (auto i = prev_start_height; i < start_height; i++) {
+        heights_to_remove.push_back(i);
+    }
+    if (heights_to_remove.size() > 0) {
+        AnalyticsBatch rows_to_remove;
+        if (!GetDB().ReadAnalytics(rows_to_remove, {{"mvrv", "REAL"}, {"miner_rev", "REAL"}}, heights_to_remove)) {
+            LogError("s%: Couldn't read prev mvrv and miner_rev data from height s%", __func__, heights_to_remove[0]);
+            return false;
+        }
+        std::vector<double> mvrv_to_remove;
+        std::vector<double> miner_rev_to_remove;
+        for (auto row : rows_to_remove) {
+            mvrv_to_remove.push_back(std::get<double>(row.second[0]));
+            miner_rev_to_remove.push_back(std::get<double>(row.second[1]));
+        }
+        m_temp_vars.mvrv_stats.remove(mvrv_to_remove);
+        m_temp_vars.miner_rev_stats.remove(miner_rev_to_remove);
+    }
+    m_temp_vars.mvrv_stats.add(m_row.mvrv);
+    m_temp_vars.miner_rev_stats.add(m_row.miner_revenue);
+
+    m_row.mvrv_z = (m_row.mvrv - m_temp_vars.mvrv_stats.mean) / std::sqrt(m_temp_vars.mvrv_stats.variance());
+    m_row.puell_multiple = m_row.miner_revenue / m_temp_vars.miner_rev_stats.mean;
+
+    return true;
 }
 
-uint64_t CoreAnalytics::GetHeightAfterTimestamp(uint64_t timestamp, uint64_t current_height)
-{
-    auto start = current_height- 52560; //assuming new block every 10th minute, we start the search from now - 52560 blocks
-    auto iteration_direction = 1;
+uint64_t CoreAnalytics::GetHeightAfterTimestamp(uint64_t timestamp)
+{   
+    if (m_current_height < 52560) {
+        // Cannot go below zero or underflow
+        return 0; // Or handle as needed
+    }
+
+    uint64_t start = m_current_height - 52560;
+    int iteration_direction = 1;
+
+    // Defensive: check if start exists in map
+    if (m_utxo_map.find(start) == m_utxo_map.end()) {
+        // Handle missing start key as you want
+        return 0;
+    }
+
     if (m_utxo_map[start].timestamp > timestamp) {
         iteration_direction = -1;
+    } else {
+        iteration_direction = 1;
     }
-    
 
+    uint64_t height = start;
+
+    // Search upwards
+    if (iteration_direction == 1) {
+        while (height <= m_current_height) {
+            auto it = m_utxo_map.find(height);
+            if (it == m_utxo_map.end()) break; // no data here, stop or handle
+
+            if (it->second.timestamp > timestamp) {
+                return height;
+            }
+            height++;
+        }
+    }
+    // Search downwards
+    else {
+        while (height > 0) {
+            auto it = m_utxo_map.find(height);
+            if (it == m_utxo_map.end()) break; // no data here, stop or handle
+
+            if (it->second.timestamp <= timestamp) {
+                return height + 1; // next height is just after timestamp
+            }
+            if (height == 0) break;
+            height--;
+        }
+    }
+
+    // If not found, return 0 or some sentinel
     return 0;
+}
+
+bool CoreAnalytics::UpdateVocdMedian()
+{
+    return false;
 }
 
 // TODO: Create loadbtcprices function to retrieve prices from db. Perhaps this function should retrieve other things too like count and total outputs etc
@@ -424,3 +508,58 @@ std::unordered_map<int64_t, double> CoreAnalytics::ConvertTableToMap(const std::
     return btc_price_map;
 }
 //TODO: Create functions from pseudocode
+void RunningStats::init_from_data(const std::vector<double>& data)
+{
+    n = data.size();
+    if (n == 0) {
+        mean = 0.0;
+        M2 = 0.0;
+        return;
+    }
+
+    // Compute mean
+    double sum = 0.0;
+    for (double x : data) {
+        sum += x;
+    }
+    mean = sum / n;
+
+    // Compute M2
+    M2 = 0.0;
+    for (double x : data) {
+        double diff = x - mean;
+        M2 += diff * diff;
+    }
+}
+
+void RunningStats::add(double x)
+{
+    n++;
+    double delta = x - mean;
+    mean += delta / n;
+    double delta2 = x - mean;
+    M2 += delta * delta2;
+}
+
+void RunningStats::remove(const std::vector<double>& xs)
+{
+    for (double x : xs) {
+        if (n <= 1) {
+            n = 0;
+            mean = 0.0;
+            M2 = 0.0;
+            return;
+        }
+
+        double delta = x - mean;
+        n--;
+        mean = (mean * (n + 1) - x) / n;
+        double delta2 = x - mean;
+        M2 -= delta * delta2;
+    }
+}
+
+double RunningStats::variance() const
+{
+    return (n > 1) ? M2 / n : 0.0;
+}
