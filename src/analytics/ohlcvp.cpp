@@ -1,8 +1,5 @@
-#include "ohlcvp.h"
-#include "ohlcvp.h"
-#include "ohlcvp.h"
 #include <analytics/ohlcvp.h>
-
+#include <analytics/runningmedian.h>
 #include <arrow/array.h>
 #include <arrow/csv/api.h>
 #include <arrow/io/api.h>

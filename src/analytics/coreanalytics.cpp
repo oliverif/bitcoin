@@ -110,6 +110,26 @@ CoreAnalytics::~CoreAnalytics() {
     BaseAnalytic::~BaseAnalytic();
 }
 
+bool CoreAnalytics::CustomInit(const std::optional<interfaces::BlockRef>& block){
+    // init previous vars
+    if(!block.has_value()){
+        return false;
+    }
+    //init genesis
+    if(block.value().height == 0){
+        m_temp_vars.previous_total_new_out = 0;
+        m_temp_vars.previous_total_coinbase_amount = 0;
+    }
+    else{ //init otherwise
+        const std::optional<CCoinsStats> maybe_coin_stats = g_coin_stats_index->LookUpStats(block_index);
+        if (!maybe_coin_stats.has_value()) {
+            LogError("%s: Index data not yet available", __func__);
+            return false;
+        }
+        const CCoinsStats& coin_stats = maybe_coin_stats.value();
+    }
+}
+
 bool CoreAnalytics::CustomAppend(const interfaces::BlockInfo& block)
 {
     //TODO: add logic to make this analytic wait for ohlcvp
@@ -143,6 +163,8 @@ bool CoreAnalytics::CustomAppend(const interfaces::BlockInfo& block)
     m_utxo_map[block.height].utxo_amount = m_temp_vars.spendable_out;
     m_row.rc = m_row.rc + m_temp_vars.spendable_out * m_current_price - m_temp_vars.previous_utxo_value;
     m_row.mvrv = m_row.mc / m_row.rc;
+    m_row.realized_price = m_row.rc/m_row.cs;
+    m_row.rpv_ratio = m_row.rp/m_row.rc;
 
     if (!UpdateMeanVars(block)) {
         return false;
@@ -156,9 +178,8 @@ bool CoreAnalytics::CustomAppend(const interfaces::BlockInfo& block)
     if (!UpdateVocdMedian()) {
         return false;
     }
-
-
-
+    m_row.hodl_bank = m_temp_vars.preveious_hodl_bank * m_current_price - m_row.mvocd;
+    m_row.reserve_risk = m_current_price/m_row.hodl_bank;
 
     AnalyticsRow vCoreAnalytics = std::make_pair(blockTime, std::vector<std::variant<int64_t, double>>{coreanalytics.value()});
 
@@ -263,6 +284,7 @@ bool CoreAnalytics::ProcessTransactions(const interfaces::BlockInfo& block, cons
 
     m_row.nrpl = m_row.rp - m_row.rl;
     m_row.rplr = m_row.rp / m_row.rl;
+    m_row.asopr = new_adjusted_utxo_amount * m_current_price / previous_adjusted_utxo_value;
 
     return true;
 }
@@ -285,6 +307,8 @@ bool CoreAnalytics::GetIndexData(const interfaces::BlockInfo& block, const CBloc
     m_temp_vars.previous_nTransactionOutputs = coin_stats.nTransactionOutputs;
 
     m_row.miner_revenue = m_temp_vars.coinbase_amount * m_current_price;
+
+    m_row.transaction_fees = m_temp_vars.coinbase_amount - m_row.issuance;
 
     if (!coin_stats.total_amount.has_value()) {
         LogError("s%: Total amount does not have value for height s%", __func__, m_current_height);
@@ -410,6 +434,24 @@ uint64_t CoreAnalytics::GetHeightAfterTimestamp(uint64_t timestamp)
 
 bool CoreAnalytics::UpdateVocdMedian()
 {
+    auto start_height = GetHeightAfterTimestamp(m_current_timestamp - 2592000);
+    auto prev_start_height = GetHeightAfterTimestamp(m_utxo_map[std::max((int)m_current_height - 1,0)].timestamp - 2592000);
+    std::vector<uint64_t> heights_to_remove;
+    for (auto i = prev_start_height; i < start_height; i++) {
+        heights_to_remove.push_back(i);
+    }
+    if (heights_to_remove.size() > 0) {
+        AnalyticsBatch rows_to_remove;
+        if (!GetDB().ReadAnalytics(rows_to_remove, {{"vocd", "REAL"}}, heights_to_remove)) {
+            LogError("s%: Couldn't read prev mvrv and miner_rev data from height s%", __func__, heights_to_remove[0]);
+            return false;
+        }
+        for (auto row : rows_to_remove) {
+            m_temp_vars.mvocd_running.remove(std::get<double>(row.second[0]));
+        }
+    }
+    m_temp_vars.mvocd_running.insert(m_row.vocd)
+    m_row.mvocd = m_temp_vars.mvocd_running.median();
     return false;
 }
 

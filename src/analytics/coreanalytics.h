@@ -6,6 +6,7 @@
 #define BITCOIN_ANALYTICS_COREANALYTICS_H
 
 #include <analytics/baseanalytic.h>
+#include <analytics/runningmedian.h>
 #include <fstream>
 #include <chrono>
 #include <arrow/table.h>
@@ -19,7 +20,6 @@ static constexpr bool DEFAULT_COREANALYTICS{false};
  * location of each transaction by transaction hash.
  */
 struct CoreAnalyticsRow {
-    int64_t height;
     double issuance;
     double transaction_fees;
     double miner_revenue;
@@ -56,19 +56,20 @@ struct CoreAnalyticsRow {
     double dfath;
 };
 struct TempVars {
-    int64_t inputs;
-    double spendable_out;
-    int64_t delta_ntransaction_outputs;
-    double previous_utxo_value;
+    int64_t inputs = 0;
+    double spendable_out = 0;
+    int64_t delta_ntransaction_outputs = 0;
+    double coinbase_amount = 0;
+    double previous_utxo_value = 0;
+
     CAmount previous_total_new_out;
     CAmount previous_total_coinbase_amount;
     uint64_t previous_nTransactionOutputs;
-    double coinbase_amount;
-    CAmount prev_total_coinbase_amount;
     RunningStats mvrv_stats;
     RunningStats miner_rev_stats;
-    double prev_ath;
-    double prev_hodl_bank;
+    RunningMedian mvocd_running;
+    double previous_ath;
+    double preveious_hodl_bank;
 };
 
 struct UtxoMapEntry {
@@ -88,10 +89,6 @@ struct RunningStats {
     void remove(const std::vector<double>& xs);
     double variance() const;
 };
-
-struct RunningMedian {
-    std::multiset<double> window;
-    std::multiset<double>::iterator median_it;
 
 
 class CoreAnalytics final : public BaseAnalytic
@@ -132,6 +129,7 @@ protected:
     bool CustomAppend(const interfaces::BlockInfo& block) override;
     bool CustomCommit() override; //Needs to update utxo distribution map
     BaseAnalytic::DB& GetDB() const override;
+    bool CustomInit(const std::optional<interfaces::BlockRef>& block) override;
 
 public:
     explicit CoreAnalytics(std::unique_ptr<interfaces::Chain> chain, const fs::path& path);

@@ -114,6 +114,7 @@
         "xstddef": "cpp",
         "cfenv": "cpp",
         "cinttypes": "cpp",
-        "csignal": "cpp"
+        "csignal": "cpp",
+        "__tree": "cpp"
     }
 }
