@@ -112,6 +112,66 @@ void BaseAnalytic::DB::WriteBestBlock(const CBlockLocator& locator)
     return;
 }
 
+// Write extra per-analytic state blob
+void BaseAnalytic::DB::WriteAnalyticsState(const std::vector<uint8_t>& state)
+{
+    const char* sql =
+        "UPDATE sync_points SET analytics_state = ? WHERE analytic_id = ?;";
+
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(storageConfig.sqlite_db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        std::cerr << "Failed to prepare WriteAnalyticsState: "
+                  << sqlite3_errmsg(storageConfig.sqlite_db) << std::endl;
+        return;
+    }
+
+    if (!state.empty()) {
+        sqlite3_bind_blob(stmt, 1, state.data(), state.size(), SQLITE_TRANSIENT);
+    } else {
+        sqlite3_bind_null(stmt, 1);
+    }
+
+    sqlite3_bind_text(stmt, 2, storageConfig.analytic_id.c_str(), -1, SQLITE_TRANSIENT);
+
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+        std::cerr << "Failed to execute WriteAnalyticsState: "
+                  << sqlite3_errmsg(storageConfig.sqlite_db) << std::endl;
+    }
+
+    sqlite3_finalize(stmt);
+}
+
+// Read extra per-analytic state blob
+bool BaseAnalytic::DB::ReadAnalyticsState(std::vector<uint8_t>& out_state)
+{
+    const char* sql =
+        "SELECT analytics_state FROM sync_points WHERE analytic_id = ?;";
+
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(storageConfig.sqlite_db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        std::cerr << "Failed to prepare ReadAnalyticsState: "
+                  << sqlite3_errmsg(storageConfig.sqlite_db) << std::endl;
+        return false;
+    }
+
+    sqlite3_bind_text(stmt, 1,storageConfig.analytic_id.c_str(), -1, SQLITE_TRANSIENT);
+
+    bool ok = false;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const void* blob_data = sqlite3_column_blob(stmt, 0);
+        int blob_size = sqlite3_column_bytes(stmt, 0);
+
+        if (blob_data && blob_size > 0) {
+            out_state.assign((const uint8_t*)blob_data,
+                             (const uint8_t*)blob_data + blob_size);
+            ok = true;
+        }
+    }
+
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
 bool BaseAnalytic::DB::ReadAnalytics(AnalyticsRow& analytics, std::vector<StorageUtils::ColumnSpec> columns, uint64_t height) const
 {
     AnalyticsBatch batch;
@@ -180,6 +240,8 @@ bool BaseAnalytic::DB::ReadAnalytics(AnalyticsBatch& analytics, std::vector<Stor
     sqlite3_finalize(stmt);
     return true;
 }
+
+
 
 bool BaseAnalytic::DB::WriteAnalytics(const AnalyticsRow& analytics)
 {

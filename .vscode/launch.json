@@ -6,7 +6,7 @@
     "configurations": [
         {
             "name": "(Windows) Launch Bitcoin-Qt",
-            "type": "cppvsdbg",
+            "type": "codelldb",
             "request": "launch",
             "program": "D:/Code/bitcoin/build/src/qt/Debug/bitcoin-qt.exe",
             "args": [

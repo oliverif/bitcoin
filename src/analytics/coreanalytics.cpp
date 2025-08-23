@@ -20,6 +20,7 @@
 #include <univalue.h>
 #include <index/coinstatsindex.h>
 #include <kernel/coinstats.h>
+#include <serialize.h>
 
 std::unique_ptr<CoreAnalytics> g_coreanalytics;
 using kernel::CCoinsStats;
@@ -36,7 +37,7 @@ public:
     //bool WriteCoreAnalytics(const std::pair<uint64_t,std::vector<double>>& vCoreAnalytics) const;
 
     /// Write a batch of transaction positions to the DB.
-    [[nodiscard]] bool WriteCoreAnalytics(const CoreAnalyticsRow& coreAnalyticsRow);
+    [[nodiscard]] bool WriteCoreAnalytics(uint64_t height, const CoreAnalyticsRow& coreAnalyticsRow);
 };
 
 CoreAnalytics::DB::DB(const fs::path& path, std::string column_name) :
@@ -49,11 +50,13 @@ CoreAnalytics::DB::DB(const fs::path& path, std::string column_name) :
         .columns = {{"height", "PRIMARY INTEGER"}, {"coreanalytics","REAL"}},  
     })
 {}
+//TODO:
+//  - make config for db properly with all vars
 //gArgs.GetDataDirNet() "/analytics"
 
+//TODO: Implement custom rewind
 
-
-bool CoreAnalytics::DB::WriteCoreAnalytics(const CoreAnalyticsRow& coreAnalyticsRow)
+bool CoreAnalytics::DB::WriteCoreAnalytics(uint64_t height, const CoreAnalyticsRow& coreAnalyticsRow)
 {
     std::vector<std::variant<int64_t, double>> vals = {
         coreAnalyticsRow.issuance,
@@ -86,19 +89,19 @@ bool CoreAnalytics::DB::WriteCoreAnalytics(const CoreAnalyticsRow& coreAnalytics
         coreAnalyticsRow.abdd,
         coreAnalyticsRow.vocd,
         coreAnalyticsRow.mvocd,
-            coreAnalyticsRow.hodl_bank,
-            coreAnalyticsRow.reserve_risk,
-            coreAnalyticsRow.ath,
-            coreAnalyticsRow.dfath};
-            AnalyticsRow row = { coreAnalyticsRow.height, vals };
-            return WriteAnalytics(row);
+        coreAnalyticsRow.hodl_bank,
+        coreAnalyticsRow.reserve_risk,
+        coreAnalyticsRow.ath,
+        coreAnalyticsRow.dfath};
+    AnalyticsRow row = {height, vals };
+    return WriteAnalytics(row);
 }
 
 CoreAnalytics::CoreAnalytics(std::unique_ptr<interfaces::Chain> chain, const fs::path& path)
     : BaseAnalytic(std::move(chain), "coreanalytics"), m_db(std::make_unique<CoreAnalytics::DB>(path, "coreanalytics"))
 {
     std::string csv_file_path = "C:\\Users\\Oliver\\Code\\CryptoTrader\\data\\block_prices_usd.csv";
-    btc_price_map = LoadBTCPrices(csv_file_path);
+    //btc_price_map = LoadBTCPrices(csv_file_path);
 
     log_stream = std::ofstream("D:/Code/bitcoin/error_log.txt", std::ios::app);
     perf_stream = std::ofstream("D:/Code/bitcoin/performance_log.txt", std::ios::app);
@@ -121,20 +124,98 @@ bool CoreAnalytics::CustomInit(const std::optional<interfaces::BlockRef>& block)
         m_temp_vars.previous_total_coinbase_amount = 0;
     }
     else{ //init otherwise
-        const std::optional<CCoinsStats> maybe_coin_stats = g_coin_stats_index->LookUpStats(block_index);
+        const CBlockIndex* pindex = WITH_LOCK(cs_main, return m_chainstate->m_blockman.LookupBlockIndex(block.value().hash));
+        const std::optional<CCoinsStats> maybe_coin_stats = g_coin_stats_index->LookUpStats(*pindex);
         if (!maybe_coin_stats.has_value()) {
             LogError("%s: Index data not yet available", __func__);
             return false;
         }
         const CCoinsStats& coin_stats = maybe_coin_stats.value();
+        m_temp_vars.previous_total_new_out = coin_stats.total_new_outputs_ex_coinbase_amount;
+        m_temp_vars.previous_total_coinbase_amount = coin_stats.total_coinbase_amount;
+        m_temp_vars.previous_nTransactionOutputs = coin_stats.nTransactionOutputs;
+
+
+
+        
+        
+        //get prev utxo map
+        if (!LoadUtxoMap()) {
+            return false;
+        }
+
+        //Note, the best_block loaded at init is the prev block. When sync is called p_next is the block processed. I.e the prev timestamp in the utxo map is the latest entry. 
+        uint64_t start_height_year = GetHeightAfterTimestamp(m_utxo_map[block.value().height].timestamp - 31536000, block.value().height);
+        std::vector<uint64_t> prev_stats_heights;
+        for (auto i = start_height_year; i < block.value().height; i++) {
+            prev_stats_heights.push_back(i);
+        }
+        AnalyticsBatch prev_stats;
+        if (!GetDB().ReadAnalytics(prev_stats, {{"mvrv", "REAL"}, {"miner_rev", "REAL"}}, prev_stats_heights)) {
+            LogError("s%: Couldn't read prev mvrv and miner_rev data from height s%", __func__, prev_stats_heights[0]);
+            return false;
+        }
+        std::vector<double> mvrv_data;
+        std::vector<double> miner_rev_data;
+        for (auto row : prev_stats) {
+            mvrv_data.push_back(std::get<double>(row.second[0]));
+            miner_rev_data.push_back(std::get<double>(row.second[1]));
+        }
+        m_temp_vars.mvrv_stats.init_from_data(mvrv_data);
+        m_temp_vars.miner_rev_stats.init_from_data(miner_rev_data);
+
+        //Load vocd median
+        uint64_t start_height_month = GetHeightAfterTimestamp(m_utxo_map[block.value().height].timestamp - 2592000, block.value().height);
+        std::vector<uint64_t> prev_vocd_heights;
+        for (auto i = start_height_month; i < block.value().height; i++) {
+            prev_vocd_heights.push_back(i);
+        }
+        AnalyticsBatch prev_stats;
+        if (!GetDB().ReadAnalytics(prev_stats, {{"vocd", "REAL"}}, prev_vocd_heights)) {
+            LogError("s%: Couldn't read prev vocd from height s%", __func__, prev_vocd_heights[0]);
+            return false;
+        }
+        std::vector<double> vocd_data;
+        for (auto row : prev_stats) {
+            vocd_data.push_back(std::get<double>(row.second[0]));
+        }
+        m_temp_vars.mvocd_running.init_from_data(vocd_data);
+
+        AnalyticsRow prev_row;
+        if (!GetDB().ReadAnalytics(prev_row, {{"ath", "REAL"}, {"hodl_bank", "REAL"}}, block.value().height)) {
+            LogError("s%: Couldn't read prev vocd from height s%", __func__, prev_vocd_heights[0]);
+            return false;
+        }
+        m_temp_vars.previous_ath = std::get<double>(prev_row.second[0]);
+        m_temp_vars.preveious_hodl_bank = std::get<double>(prev_row.second[1]);
     }
+    return true;
+}
+
+bool CoreAnalytics::LoadUtxoMap() {
+    std::vector<uint8_t> blob;
+    if (GetDB().ReadAnalyticsState(blob) && !blob.empty()) {
+        try {
+            std::vector<const uint8_t> const_blob(blob.begin(), blob.end());
+            DataStream ds(const_blob);
+            DeserializeUtxoMap(m_utxo_map, ds);
+        } catch (const std::exception& e) {
+            LogError("%s: Failed to deserialize UTXO map: %s\n", __func__, e.what());
+            return false;
+        }
+    } else {
+        LogError("%s: Failed to read UTXO map from db\n", __func__);
+        return false;
+    }
+    return true;
 }
 
 bool CoreAnalytics::CustomAppend(const interfaces::BlockInfo& block)
 {
     //TODO: add logic to make this analytic wait for ohlcvp
+    // TODO: handle init when genesis block. Should I still write to db? Are there other functions that collects data from db?
     // Exclude genesis block transaction because outputs are not spendable.
-    if (block.height == 0) return true;
+    //if (block.height == 0) return true;
 
     assert(block.data);
 
@@ -181,22 +262,62 @@ bool CoreAnalytics::CustomAppend(const interfaces::BlockInfo& block)
     m_row.hodl_bank = m_temp_vars.preveious_hodl_bank * m_current_price - m_row.mvocd;
     m_row.reserve_risk = m_current_price/m_row.hodl_bank;
 
+    //TODO write analytics properly and set up db for all vars
     AnalyticsRow vCoreAnalytics = std::make_pair(blockTime, std::vector<std::variant<int64_t, double>>{coreanalytics.value()});
 
     return m_db->WriteCoreAnalytics(vCoreAnalytics);
 }
 
+bool CoreAnalytics::CustomCommit()
+{
+    DataStream ds;
+    SerializeUtxoMap(m_utxo_map, ds);
+    std::string blob = ds.str(); // get raw bytes
+    GetDB().WriteAnalyticsState({reinterpret_cast<const uint8_t*>(blob.data()),
+                                 reinterpret_cast<const uint8_t*>(blob.data()) + blob.size()});
+    return true;
+}
+
+
+
 BaseAnalytic::DB& CoreAnalytics::GetDB() const { return *m_db; }
+
+
+
+void CoreAnalytics::SerializeUtxoMap(const UtxoMap& map, DataStream& s)
+{
+    s << static_cast<uint64_t>(map.size());
+    for (const auto& [height, entry] : map) {
+        s << height;
+        entry.Serialize(s);
+    }
+}
+
+void CoreAnalytics::DeserializeUtxoMap(UtxoMap& map, DataStream& s)
+{
+    map.clear();
+    uint64_t size;
+    s >> size;
+    for (uint64_t i = 0; i < size; ++i) {
+        int64_t height;
+        s >> height;
+        UtxoMapEntry entry;
+        entry.Deserialize(s);
+        map.emplace(height, std::move(entry));
+    }
+}
 
 bool CoreAnalytics::UpdatePriceMap()
 {
-    if (m_utxo_map.empty()) {
-        // Get price from db
-        // and set ath to last
+    //When genesis block, read row 0 of timestamp and price, else must check that current map is ok
+    if (m_current_height > 0 && (m_utxo_map.empty() || !m_utxo_map.contains(m_current_height - 1))) {
+        LogError("%s: Utxo map not loaded properly %s", __func__, m_current_height);
+        return false;
     } else {
         AnalyticsRow new_row;
         if (!GetDB().ReadAnalytics(new_row, {{"timestamp", "INTEGER"}, {"price", "REAL"}}, m_current_height)) {
             LogError("%s: Could not read new price row of height %s", __func__, m_current_height);
+            return false;
         }
         UtxoMapEntry new_entry{
             .timestamp = std::get<double>(new_row.second[0]),
@@ -215,7 +336,6 @@ bool CoreAnalytics::UpdatePriceMap()
 
 bool CoreAnalytics::ProcessTransactions(const interfaces::BlockInfo& block, const CBlockUndo& blockUndo)
 {
-    //TODO: Add calculations for the other stuff that needs to be calculated in the loop. Change name of function
     m_row.bdd = 0;
     m_row.rp = 0;
     m_row.rl = 0;
@@ -250,6 +370,13 @@ bool CoreAnalytics::ProcessTransactions(const interfaces::BlockInfo& block, cons
         }
         // Calculate total input value for the transaction
         for (unsigned int i = 0; i < tx->vin.size(); i++) {
+            //This is unspendable output, not input..
+            /* const CTxOut& out{tx->vout[i]};
+            Coin coin{out, block.height, tx->IsCoinBase()};
+            if (coin.out.scriptPubKey.IsUnspendable()) {
+                continue;
+            }*/
+
             const CTxIn& txin = tx->vin[i];
             const Coin& prev_coin = undoTX->vprevout[i];
             const CTxOut& prev_txout = prev_coin.out;
@@ -348,8 +475,8 @@ bool CoreAnalytics::CalculateUtxoMetrics(const interfaces::BlockInfo& block)
 
 bool CoreAnalytics::UpdateMeanVars(const interfaces::BlockInfo& block)
 {
-    auto start_height = GetHeightAfterTimestamp(m_current_timestamp - 31536000);
-    auto prev_start_height = GetHeightAfterTimestamp(m_utxo_map[std::max((int)m_current_height - 1,0)].timestamp - 31536000);
+    auto start_height = GetHeightAfterTimestamp(m_current_timestamp - 31536000, m_current_height);
+    auto prev_start_height = GetHeightAfterTimestamp(m_utxo_map[std::max((int)m_current_height - 1, 0)].timestamp - 31536000, m_current_height);
     std::vector<uint64_t> heights_to_remove;
     for (auto i = prev_start_height; i < start_height; i++) {
         heights_to_remove.push_back(i);
@@ -378,14 +505,14 @@ bool CoreAnalytics::UpdateMeanVars(const interfaces::BlockInfo& block)
     return true;
 }
 
-uint64_t CoreAnalytics::GetHeightAfterTimestamp(uint64_t timestamp)
+uint64_t CoreAnalytics::GetHeightAfterTimestamp(uint64_t timestamp, uint64_t height)
 {   
-    if (m_current_height < 52560) {
+    if (height < 52560) {
         // Cannot go below zero or underflow
         return 0; // Or handle as needed
     }
 
-    uint64_t start = m_current_height - 52560;
+    uint64_t start = height - 52560;
     int iteration_direction = 1;
 
     // Defensive: check if start exists in map
@@ -400,31 +527,31 @@ uint64_t CoreAnalytics::GetHeightAfterTimestamp(uint64_t timestamp)
         iteration_direction = 1;
     }
 
-    uint64_t height = start;
+    uint64_t h = start;
 
     // Search upwards
     if (iteration_direction == 1) {
-        while (height <= m_current_height) {
-            auto it = m_utxo_map.find(height);
+        while (h <= height) {
+            auto it = m_utxo_map.find(h);
             if (it == m_utxo_map.end()) break; // no data here, stop or handle
 
             if (it->second.timestamp > timestamp) {
-                return height;
+                return h;
             }
-            height++;
+            h++;
         }
     }
     // Search downwards
     else {
-        while (height > 0) {
-            auto it = m_utxo_map.find(height);
+        while (h > 0) {
+            auto it = m_utxo_map.find(h);
             if (it == m_utxo_map.end()) break; // no data here, stop or handle
 
             if (it->second.timestamp <= timestamp) {
-                return height + 1; // next height is just after timestamp
+                return h + 1; // next height is just after timestamp
             }
-            if (height == 0) break;
-            height--;
+            if (h == 0) break;
+            h--;
         }
     }
 
@@ -434,8 +561,8 @@ uint64_t CoreAnalytics::GetHeightAfterTimestamp(uint64_t timestamp)
 
 bool CoreAnalytics::UpdateVocdMedian()
 {
-    auto start_height = GetHeightAfterTimestamp(m_current_timestamp - 2592000);
-    auto prev_start_height = GetHeightAfterTimestamp(m_utxo_map[std::max((int)m_current_height - 1,0)].timestamp - 2592000);
+    auto start_height = GetHeightAfterTimestamp(m_current_timestamp - 2592000, m_current_height);
+    auto prev_start_height = GetHeightAfterTimestamp(m_utxo_map[std::max((int)m_current_height - 1,0)].timestamp - 2592000,m_current_height);
     std::vector<uint64_t> heights_to_remove;
     for (auto i = prev_start_height; i < start_height; i++) {
         heights_to_remove.push_back(i);
@@ -450,106 +577,11 @@ bool CoreAnalytics::UpdateVocdMedian()
             m_temp_vars.mvocd_running.remove(std::get<double>(row.second[0]));
         }
     }
-    m_temp_vars.mvocd_running.insert(m_row.vocd)
+    m_temp_vars.mvocd_running.insert(m_row.vocd);
     m_row.mvocd = m_temp_vars.mvocd_running.median();
     return false;
 }
 
-// TODO: Create loadbtcprices function to retrieve prices from db. Perhaps this function should retrieve other things too like count and total outputs etc
-std::unordered_map<int64_t, double> CoreAnalytics::LoadBTCPrices(const std::string& file_path){
-    // Create a file reader
-    auto file_result = arrow::io::ReadableFile::Open(file_path);
-    if (!file_result.ok()) {
-        std::ofstream log_file("D:/Code/bitcoin/error_log.txt", std::ios::app);
-        log_file << "Error opening file: " << file_result.status().ToString() << std::endl;
-        throw std::ios_base::failure("Error creating logfile");
-    }
-    std::shared_ptr<arrow::io::ReadableFile> input_file = *file_result;
-
-    // Create an IOContext
-    arrow::io::IOContext io_context = arrow::io::default_io_context();
-
-    auto read_options = arrow::csv::ReadOptions::Defaults();
-    auto parse_options = arrow::csv::ParseOptions::Defaults();
-    auto convert_options = arrow::csv::ConvertOptions::Defaults();
-    auto write_options = arrow::csv::WriteOptions::Defaults();
-
-    auto maybe_reader = arrow::csv::TableReader::Make(
-        io_context, input_file, read_options, parse_options, convert_options);
-    
-    if (!maybe_reader.ok()) {
-        std::ofstream log_file("D:/Code/bitcoin/error_log.txt", std::ios::app);
-        log_file << "Error creating table reader: " << maybe_reader.status().ToString() << std::endl;
-        throw std::ios_base::failure("Error creating table reader: " + maybe_reader.status().ToString());
-    }
-    
-    std::shared_ptr<arrow::csv::TableReader> reader  = *maybe_reader;
-
-    // Read the table
-    auto maybe_table = reader->Read();
-   if (!maybe_table.ok()) {
-        std::ofstream log_file("D:/Code\\bitcoin/error_log.txt", std::ios::app);
-        log_file << "Error reading table: " << maybe_table.status().ToString() << std::endl;
-        throw std::ios_base::failure("Error reading table: " + maybe_table.status().ToString());
-    }
-    auto table = maybe_table.ValueOrDie();
-    // Extract columns
-    /*auto timestamp_column = std::static_pointer_cast<arrow::Int64Array>(table->column(0)->chunk(0));
-    auto price_column = std::static_pointer_cast<arrow::DoubleArray>(table->column(1)->chunk(0));
-
-    // Convert to unordered_map
-    std::unordered_map<int64_t, double> btc_price_map;
-    for (int64_t i = 0; i < timestamp_column->length(); ++i) {
-        btc_price_map[timestamp_column->Value(i)] = price_column->Value(i);
-    }*/
-   auto btc_price_map = ConvertTableToMap(table);
-    
-
-    return btc_price_map;
-}
-
-std::optional<double> CoreAnalytics::GetBTCPrice(const std::unordered_map<int64_t, double>& btc_price_map, 
-                                  int64_t timestamp, 
-                                  std::ofstream& log_stream) {
-
-    
-    if (timestamp < 1382330735){return 165.0;}
-
-    auto it = btc_price_map.find(timestamp);
-    if (it != btc_price_map.end()) {
-        return it->second;  // Found price, return it
-    }
-
-    // Log missing timestamp (efficient logging)
-    if (log_stream.is_open()) {
-        log_stream <<"Missing timestamp: " << timestamp << "\n";  // Append missing timestamp
-    } else {
-        std::cerr << "Error: log file is not open." << std::endl;
-    }
-
-    return std::nullopt;  // Indicate that no price was found
-}
-
-std::unordered_map<int64_t, double> CoreAnalytics::ConvertTableToMap(const std::shared_ptr<arrow::Table>& table) {
-    auto timestamp_column = table->column(0);
-    auto price_column = table->column(1);
-
-    std::unordered_map<int64_t, double> btc_price_map;
-
-    for (int chunk_index = 0; chunk_index < timestamp_column->num_chunks(); ++chunk_index) {
-        auto timestamp_chunk = std::static_pointer_cast<arrow::Int64Array>(timestamp_column->chunk(chunk_index));
-        auto price_chunk = std::static_pointer_cast<arrow::DoubleArray>(price_column->chunk(chunk_index));
-
-        for (int64_t i = 0; i < timestamp_chunk->length(); ++i) {
-            int64_t timestamp = timestamp_chunk->Value(i);
-            double price = price_chunk->Value(i);
-            btc_price_map[timestamp] = price;
-        }
-    }
-
-    return btc_price_map;
-}
-//TODO: Create functions from pseudocode
 void RunningStats::init_from_data(const std::vector<double>& data)
 {
     n = data.size();

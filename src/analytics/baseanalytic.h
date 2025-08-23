@@ -70,6 +70,9 @@ protected:
         /// Write block locator of the chain that the index is in sync with.
         void WriteBestBlock(const CBlockLocator& locator);
 
+        void WriteAnalyticsState(const std::vector<uint8_t>& state);
+        bool ReadAnalyticsState(std::vector<uint8_t>& out_state);
+
         bool ReadAnalytics(AnalyticsRow& analytics, std::vector<StorageUtils::ColumnSpec> columns, uint64_t height) const;
         bool ReadAnalytics(AnalyticsBatch& analytics, std::vector<StorageUtils::ColumnSpec> columns, std::vector<uint64_t> heights) const;
 

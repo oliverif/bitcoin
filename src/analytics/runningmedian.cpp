@@ -1,7 +1,30 @@
 #include <analytics/runningmedian.h>
 #include <iterator>
 
-RunningMedian::RunningMedian() {}
+RunningMedian::RunningMedian() : median_it(window.end()) {}
+
+void RunningMedian::init_from_data(const std::vector<double>& data)
+{
+    // Clear any existing data
+    clear();
+
+    if (data.empty()) {
+        return;
+    }
+
+    // Insert all values into the multiset
+    window.insert(data.begin(), data.end());
+
+    // Set the median iterator to point to the correct position
+    size_t n = window.size();
+    if (n % 2 == 1) {
+        // Odd number of elements: median is the middle element
+        median_it = std::next(window.begin(), n / 2);
+    } else {
+        // Even number of elements: median_it points to the second of the two middle elements
+        median_it = std::next(window.begin(), n / 2);
+    }
+}
 
 void RunningMedian::insert(double value) {
     if (window.empty()) {

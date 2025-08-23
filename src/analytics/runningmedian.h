@@ -11,6 +11,7 @@ public:
     double median() const;
     size_t size() const;
     void clear();
+    void init_from_data(const std::vector<double>& data);
 
 private:
     std::multiset<double> window;

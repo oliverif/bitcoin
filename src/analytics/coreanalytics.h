@@ -77,7 +77,17 @@ struct UtxoMapEntry {
     double price;
     int64_t utxo_count;
     double utxo_amount;
+
+    void Serialize(DataStream& ds) const
+    {
+        ds << timestamp << price << utxo_count << utxo_amount;
+    }
+    void Deserialize(DataStream& ds)
+    {
+        ds >> timestamp >> price >> utxo_count >> utxo_amount;
+    }
 };
+using UtxoMap = std::unordered_map<int64_t, UtxoMapEntry>;
 
 struct RunningStats {
     int n = 0;
@@ -120,16 +130,21 @@ private:
     bool GetIndexData(const interfaces::BlockInfo& block, const CBlockIndex& block_index);
     bool CalculateUtxoMetrics(const interfaces::BlockInfo& block);
     bool UpdateMeanVars(const interfaces::BlockInfo& block);
-    uint64_t GetHeightAfterTimestamp(uint64_t timestamp);
+    uint64_t GetHeightAfterTimestamp(uint64_t timestamp, uint64_t height);
     bool UpdateVocdMedian();
+    void SerializeUtxoMap(const UtxoMap& map, DataStream& s);
+    void DeserializeUtxoMap(UtxoMap& map, DataStream& s);
 
 
 
 protected:
     bool CustomAppend(const interfaces::BlockInfo& block) override;
     bool CustomCommit() override; //Needs to update utxo distribution map
+    bool CustomRewind(const interfaces::BlockRef& current_tip, const interfaces::BlockRef& new_tip) override; //TODO: implement rewind logic
     BaseAnalytic::DB& GetDB() const override;
     bool CustomInit(const std::optional<interfaces::BlockRef>& block) override;
+
+    bool LoadUtxoMap();
 
 public:
     explicit CoreAnalytics(std::unique_ptr<interfaces::Chain> chain, const fs::path& path);
