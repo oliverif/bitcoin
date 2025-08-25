@@ -279,8 +279,8 @@ bool Ohlcvp::GetKlines(const interfaces::BlockInfo& block, AnalyticsRow& new_row
 
 bool Ohlcvp::CustomAppend(const interfaces::BlockInfo& block)
 {
-    // Exclude genesis block transaction because outputs are not spendable.
-    if (block.height == 0) return true;
+    // Exclude genesis block transaction because outputs are not spendable. No shouldnt really, but it should be covered by backfill anyways.
+    //if (block.height == 0) return true;
 
     assert(block.data);
 

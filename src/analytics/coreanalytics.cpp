@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <analytics/coreanalytics.h>
+#include <analytics/ohlcvp.h>
 #include <chainparams.h>
 #include <clientversion.h>
 #include <common/args.h>
@@ -47,12 +48,44 @@ CoreAnalytics::DB::DB(const fs::path& path, std::string column_name) :
         .db_path = gArgs.GetDataDirNet() / "analytics" / "analytics.db ",
         .sqlite_db = nullptr,
         .table_name = "analytics",
-        .columns = {{"height", "PRIMARY INTEGER"}, {"coreanalytics","REAL"}},  
+        .columns = {
+            {"height", "PRIMARY INTEGER"},
+            {"issuance","REAL"},
+            {"transaction_fees","REAL"},
+            {"miner_revenue","REAL"},
+            {"puell_multiple","REAL"},
+            {"bdd","REAL"},
+            {"asopr","REAL"},
+            {"rc","REAL"},
+            {"rp","REAL"},
+            {"rl","REAL"},
+            {"nrpl","REAL"},
+            {"rplr","REAL"},
+            {"cs","REAL"},
+            {"mc","REAL"},
+            {"mvrv","REAL"},
+            {"mvrv_z","REAL"},
+            {"realized_price","REAL"},
+            {"rpv_ratio","REAL"},
+            {"utxos_in_loss","REAL"},
+            {"utxos_in_profit","REAL"},
+            {"percent_utxos_in_profit","REAL"},
+            {"percent_supply_in_profit","REAL"},
+            {"total_supply_in_loss","REAL"},
+            {"total_supply_in_profit","REAL"},
+            {"ul","REAL"},
+            {"up","REAL"},
+            {"rul","REAL"},
+            {"rup","REAL"},
+            {"abdd","REAL"},
+            {"vocd","REAL"},
+            {"mvocd","REAL"},
+            {"hodl_bank","REAL"},
+            {"reserve_risk","REAL"},
+            {"ath","REAL"},
+            {"dfat", "REAL"}}
     })
 {}
-//TODO:
-//  - make config for db properly with all vars
-//gArgs.GetDataDirNet() "/analytics"
 
 //TODO: Implement custom rewind
 
@@ -100,9 +133,6 @@ bool CoreAnalytics::DB::WriteCoreAnalytics(uint64_t height, const CoreAnalyticsR
 CoreAnalytics::CoreAnalytics(std::unique_ptr<interfaces::Chain> chain, const fs::path& path)
     : BaseAnalytic(std::move(chain), "coreanalytics"), m_db(std::make_unique<CoreAnalytics::DB>(path, "coreanalytics"))
 {
-    std::string csv_file_path = "C:\\Users\\Oliver\\Code\\CryptoTrader\\data\\block_prices_usd.csv";
-    //btc_price_map = LoadBTCPrices(csv_file_path);
-
     log_stream = std::ofstream("D:/Code/bitcoin/error_log.txt", std::ios::app);
     perf_stream = std::ofstream("D:/Code/bitcoin/performance_log.txt", std::ios::app);
 }
@@ -134,11 +164,7 @@ bool CoreAnalytics::CustomInit(const std::optional<interfaces::BlockRef>& block)
         m_temp_vars.previous_total_new_out = coin_stats.total_new_outputs_ex_coinbase_amount;
         m_temp_vars.previous_total_coinbase_amount = coin_stats.total_coinbase_amount;
         m_temp_vars.previous_nTransactionOutputs = coin_stats.nTransactionOutputs;
-
-
-
-        
-        
+     
         //get prev utxo map
         if (!LoadUtxoMap()) {
             return false;
@@ -212,13 +238,12 @@ bool CoreAnalytics::LoadUtxoMap() {
 
 bool CoreAnalytics::CustomAppend(const interfaces::BlockInfo& block)
 {
-    //TODO: add logic to make this analytic wait for ohlcvp
-    // TODO: handle init when genesis block. Should I still write to db? Are there other functions that collects data from db?
-    // Exclude genesis block transaction because outputs are not spendable.
-    //if (block.height == 0) return true;
-
     assert(block.data);
-
+    if (prerequisite_height <= m_current_height) {
+        if (!WaitForPrerequisite()) {
+            return false;
+        }
+    }
     CBlockUndo block_undo;
     const CBlockIndex* pindex = WITH_LOCK(cs_main, return m_chainstate->m_blockman.LookupBlockIndex(block.hash));
     if (!m_chainstate->m_blockman.ReadBlockUndo(block_undo, *pindex)) {
@@ -229,43 +254,78 @@ bool CoreAnalytics::CustomAppend(const interfaces::BlockInfo& block)
 
     if (!UpdatePriceMap()) {
         return false;
-    }    
-    if (!ProcessTransactions(block, block_undo)) {
+    }
+    if (block.height == 0) {
+        m_row.asopr = 1;
+        m_row.rplr = 1;
+        m_row.mvrv = 1;
+        m_row.rpv_ratio = 1;
+        m_row.rul = 1;
+        m_row.rup = 1;
+        m_temp_vars.mvocd_running.insert(0);
+        m_row.mvocd = m_temp_vars.mvocd_running.median();
+        m_temp_vars.mvrv_stats.add(0);
+        m_temp_vars.miner_rev_stats.add(0);
+    } else {
+        // Skip this when genesis but keep metrics as 0 and write. Or we default some to 1
+        if (!ProcessTransactions(block, block_undo)) {
+            return false;
+        }
+        if (!GetIndexData(block, *pindex)) {
+            return false;
+        }
+        if (!CalculateUtxoMetrics(block)) {
+            return false;
+        }
+        m_row.mc = m_row.cs * m_current_price;
+        m_utxo_map[block.height].utxo_count = m_temp_vars.delta_ntransaction_outputs + m_temp_vars.inputs;
+        m_utxo_map[block.height].utxo_amount = m_temp_vars.spendable_out;
+        m_row.rc = m_row.rc + m_temp_vars.spendable_out * m_current_price - m_temp_vars.previous_utxo_value;
+        m_row.mvrv = m_row.mc / m_row.rc;
+        m_row.realized_price = m_row.rc / m_row.cs;
+        m_row.rpv_ratio = m_row.rp / m_row.rc;
+
+        if (!UpdateMeanVars(block)) {
+            return false;
+        }
+
+        m_row.rul = m_row.ul / m_row.mc;
+        m_row.rup = m_row.up / m_row.mc;
+        m_row.abdd = m_row.bdd / m_row.cs;
+        m_row.vocd = m_row.abdd * m_current_price;
+
+        if (!UpdateVocdMedian()) {
+            return false;
+        }
+        m_row.hodl_bank = m_temp_vars.preveious_hodl_bank * m_current_price - m_row.mvocd;
+        m_row.reserve_risk = m_current_price / m_row.hodl_bank;
+    }
+
+    if (!m_db->WriteCoreAnalytics(m_current_height,m_row)) {
+        LogError("%s: Could not write new row for coreanalytics\n", __func__);
         return false;
     }
-    if (!GetIndexData(block, *pindex)) {
-        return false;
+
+    return true;
+}
+
+bool CoreAnalytics::WaitForPrerequisite(std::chrono::seconds timeout = std::chrono::seconds(60))
+{
+    auto start = std::chrono::steady_clock::now();
+    std::chrono::milliseconds delay(100);
+
+    while (std::chrono::steady_clock::now() - start < timeout) {
+        prerequisite_height = std::min(g_coin_stats_index->GetSummary().best_block_height, g_ohlcvp->GetSummary().best_block_height);
+        if (prerequisite_height > m_current_height) {
+            return true;
+        }
+
+        std::this_thread::sleep_for(delay);
+        delay = std::min(delay * 2, std::chrono::milliseconds(5000)); // Exponential backoff
     }
-    if (!CalculateUtxoMetrics(block)) {
-        return false;
-    }
-    m_row.mc = m_row.cs * m_current_price;
-    m_utxo_map[block.height].utxo_count = m_temp_vars.delta_ntransaction_outputs + m_temp_vars.inputs;
-    m_utxo_map[block.height].utxo_amount = m_temp_vars.spendable_out;
-    m_row.rc = m_row.rc + m_temp_vars.spendable_out * m_current_price - m_temp_vars.previous_utxo_value;
-    m_row.mvrv = m_row.mc / m_row.rc;
-    m_row.realized_price = m_row.rc/m_row.cs;
-    m_row.rpv_ratio = m_row.rp/m_row.rc;
 
-    if (!UpdateMeanVars(block)) {
-        return false;
-    }
-
-    m_row.rul = m_row.ul / m_row.mc;
-    m_row.rup = m_row.up / m_row.mc;
-    m_row.abdd = m_row.bdd / m_row.cs;
-    m_row.vocd = m_row.abdd * m_current_price;
-
-    if (!UpdateVocdMedian()) {
-        return false;
-    }
-    m_row.hodl_bank = m_temp_vars.preveious_hodl_bank * m_current_price - m_row.mvocd;
-    m_row.reserve_risk = m_current_price/m_row.hodl_bank;
-
-    //TODO write analytics properly and set up db for all vars
-    AnalyticsRow vCoreAnalytics = std::make_pair(blockTime, std::vector<std::variant<int64_t, double>>{coreanalytics.value()});
-
-    return m_db->WriteCoreAnalytics(vCoreAnalytics);
+    LogError("%s: Timed out while waiting for prerequisite analytics and index. Prerequisite at height %s\n", __func__, prerequisite_height);
+    return false;
 }
 
 bool CoreAnalytics::CustomCommit()
@@ -343,23 +403,11 @@ bool CoreAnalytics::ProcessTransactions(const interfaces::BlockInfo& block, cons
     m_temp_vars.previous_utxo_value = 0;
     double previous_adjusted_utxo_value = 0;
     double new_adjusted_utxo_amount = 0;
-    double young_coins = 0;
-    uint64_t current_timestamp;
-    double current_price;
-    {
-        auto it = m_utxo_map.find(block.height);
-        if (it != m_utxo_map.end()) {
-            LogError("%s: Price not available for block with height %s", __func__, prev_coin.nHeight);
-            return false;
-        }
-        current_timestamp = it->second.timestamp;
-        current_price = it->second.price;
-    }
-
 
     for (const CTransactionRef& tx : block.data->vtx) {
+        //We do not need to consider unspendables here, as we're only processing inputs, which are spend output and thereby implicitly spendable outputs.
         if (tx->IsCoinBase()) {
-            continue; // Skip coinbase transactions
+            continue; // Skip coinbase transactions as they don't have any inputs to consider. We only consider inputs in this function.
         }
         m_temp_vars.inputs += tx->vin.size();
         const CTxUndo* undoTX{ nullptr };
@@ -370,13 +418,6 @@ bool CoreAnalytics::ProcessTransactions(const interfaces::BlockInfo& block, cons
         }
         // Calculate total input value for the transaction
         for (unsigned int i = 0; i < tx->vin.size(); i++) {
-            //This is unspendable output, not input..
-            /* const CTxOut& out{tx->vout[i]};
-            Coin coin{out, block.height, tx->IsCoinBase()};
-            if (coin.out.scriptPubKey.IsUnspendable()) {
-                continue;
-            }*/
-
             const CTxIn& txin = tx->vin[i];
             const Coin& prev_coin = undoTX->vprevout[i];
             const CTxOut& prev_txout = prev_coin.out;
@@ -388,19 +429,19 @@ bool CoreAnalytics::ProcessTransactions(const interfaces::BlockInfo& block, cons
                 return false;
             }
             auto& utxo_entry = it->second;
-            if (current_timestamp - utxo_entry.timestamp > 3600) { // skip transactions shorter than an hour
+            if (m_current_timestamp - utxo_entry.timestamp > 3600) { // skip transactions shorter than an hour
                 previous_adjusted_utxo_value += btc_amount * utxo_entry.price;
                 new_adjusted_utxo_amount += btc_amount;
             }
             m_temp_vars.previous_utxo_value += btc_amount * utxo_entry.price;
 
-            m_row.bdd += btc_amount * static_cast<double>(current_timestamp - utxo_entry.timestamp) / 86400.0;
+            m_row.bdd += btc_amount * static_cast<double>(m_current_timestamp - utxo_entry.timestamp) / 86400.0;
 
-            if (current_price > utxo_entry.price) {
-                m_row.rp += btc_amount * (current_price - utxo_entry.price);
+            if (m_current_price > utxo_entry.price) {
+                m_row.rp += btc_amount * (m_current_price - utxo_entry.price);
             }
             else {
-                m_row.rl += btc_amount * (utxo_entry.price - current_price);
+                m_row.rl += btc_amount * (utxo_entry.price - m_current_price);
             }
 
             utxo_entry.utxo_amount -= btc_amount;

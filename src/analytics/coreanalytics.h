@@ -114,6 +114,7 @@ private:
     double m_current_price;
     uint64_t m_current_timestamp;
     uint64_t m_current_height;
+    uint64_t prerequisite_height;
     std::ofstream log_stream;
     std::ofstream perf_stream;
 
@@ -139,6 +140,7 @@ private:
 
 protected:
     bool CustomAppend(const interfaces::BlockInfo& block) override;
+    bool WaitForPrerequisite(std::chrono::seconds timeout);
     bool CustomCommit() override; //Needs to update utxo distribution map
     bool CustomRewind(const interfaces::BlockRef& current_tip, const interfaces::BlockRef& new_tip) override; //TODO: implement rewind logic
     BaseAnalytic::DB& GetDB() const override;
