@@ -523,25 +523,39 @@ bool BaseAnalytic::Commit()
 
 bool BaseAnalytic::Rewind(const CBlockIndex* current_tip, const CBlockIndex* new_tip)
 {
-    assert(current_tip == m_best_block_index);
     assert(current_tip->GetAncestor(new_tip->nHeight) == new_tip);
 
-    if (!CustomRewind({current_tip->GetBlockHash(), current_tip->nHeight}, {new_tip->GetBlockHash(), new_tip->nHeight})) {
-        return false;
+    CBlock block;
+    CBlockUndo block_undo;
+
+    for (const CBlockIndex* iter_tip = current_tip; iter_tip != new_tip; iter_tip = iter_tip->pprev) {
+        interfaces::BlockInfo block_info = kernel::MakeBlockInfo(iter_tip);
+        if (CustomOptions().disconnect_data) {
+            if (!m_chainstate->m_blockman.ReadBlock(block, *iter_tip)) {
+                LogError("Failed to read block %s from disk",
+                         iter_tip->GetBlockHash().ToString());
+                return false;
+            }
+            block_info.data = &block;
+        }
+        if (CustomOptions().disconnect_undo_data && iter_tip->nHeight > 0) {
+            if (!m_chainstate->m_blockman.ReadBlockUndo(block_undo, *iter_tip)) {
+                return false;
+            }
+            block_info.undo_data = &block_undo;
+        }
+        if (!CustomRemove(block_info)) {
+            return false;
+        }
     }
 
-    // In the case of a reorg, ensure persisted block locator is not stale.
+    // Don't commit here - the committed index state must never be ahead of the
+    // flushed chainstate, otherwise unclean restarts would lead to index corruption.
     // Pruning has a minimum of 288 blocks-to-keep and getting the index
     // out of sync may be possible but a users fault.
     // In case we reorg beyond the pruned depth, ReadBlock would
     // throw and lead to a graceful shutdown
     SetBestBlockIndex(new_tip);
-    if (!Commit()) {
-        // If commit fails, revert the best block index to avoid corruption.
-        SetBestBlockIndex(current_tip);
-        return false;
-    }
-
     return true;
 }
 

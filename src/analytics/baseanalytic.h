@@ -142,9 +142,11 @@ protected:
     /// commit more index state.
     virtual bool CustomCommit() { return true; }
 
-    /// Rewind index to an earlier chain tip during a chain reorg. The tip must
-    /// be an ancestor of the current best block.
-    [[nodiscard]] virtual bool CustomRewind(const interfaces::BlockRef& current_tip, const interfaces::BlockRef& new_tip) { return true; }
+    /// Return custom notification options for analytics.
+    [[nodiscard]] virtual interfaces::Chain::NotifyOptions CustomOptions() { return {}; }
+
+    /// Rewind index by one block during a chain reorg.
+    [[nodiscard]] virtual bool CustomRemove(const interfaces::BlockInfo& block) { return true; }
 
     virtual DB& GetDB() const = 0;
 
