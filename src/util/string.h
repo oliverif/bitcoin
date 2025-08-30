@@ -17,6 +17,69 @@
 #include <vector>
 
 namespace util {
+namespace detail {
+template <unsigned num_params>
+constexpr static void CheckNumFormatSpecifiers(const char* str)
+{
+    unsigned count_normal{0}; // Number of "normal" specifiers, like %s
+    unsigned count_pos{0};    // Max number in positional specifier, like %8$s
+    for (auto it{str}; *it != '\0'; ++it) {
+        if (*it != '%' || *++it == '%') continue; // Skip escaped %%
+
+        auto add_arg = [&] {
+            unsigned maybe_num{0};
+            while ('0' <= *it && *it <= '9') {
+                maybe_num *= 10;
+                maybe_num += *it - '0';
+                ++it;
+            }
+
+            if (*it == '$') {
+                ++it;
+                // Positional specifier, like %8$s
+                if (maybe_num == 0) throw "Positional format specifier must have position of at least 1";
+                count_pos = std::max(count_pos, maybe_num);
+            } else {
+                // Non-positional specifier, like %s
+                ++count_normal;
+            }
+        };
+
+        // Increase argument count and consume positional specifier, if present.
+        add_arg();
+
+        // Consume flags.
+        while (*it == '#' || *it == '0' || *it == '-' || *it == ' ' || *it == '+') ++it;
+
+        auto parse_size = [&] {
+            if (*it == '*') {
+                ++it;
+                add_arg();
+            } else {
+                while ('0' <= *it && *it <= '9') ++it;
+            }
+        };
+
+        // Consume dynamic or static width value.
+        parse_size();
+
+        // Consume dynamic or static precision value.
+        if (*it == '.') {
+            ++it;
+            parse_size();
+        }
+
+        if (*it == '\0') throw "Format specifier incorrectly terminated by end of string";
+
+        // Length and type in "[flags][width][.precision][length]type"
+        // is not checked. Parsing continues with the next '%'.
+    }
+    if (count_normal && count_pos) throw "Format specifiers must be all positional or all non-positional!";
+    unsigned count{count_normal | count_pos};
+    if (num_params != count) throw "Format specifier count must match the argument count!";
+}
+} // namespace detail
+
 /**
  * @brief A wrapper for a compile-time partially validated format string
  *
@@ -28,66 +91,7 @@ namespace util {
 template <unsigned num_params>
 struct ConstevalFormatString {
     const char* const fmt;
-    consteval ConstevalFormatString(const char* str) : fmt{str} { Detail_CheckNumFormatSpecifiers(fmt); }
-    constexpr static void Detail_CheckNumFormatSpecifiers(const char* str)
-    {
-        unsigned count_normal{0}; // Number of "normal" specifiers, like %s
-        unsigned count_pos{0};    // Max number in positional specifier, like %8$s
-        for (auto it{str}; *it != '\0'; ++it) {
-            if (*it != '%' || *++it == '%') continue; // Skip escaped %%
-
-            auto add_arg = [&] {
-                unsigned maybe_num{0};
-                while ('0' <= *it && *it <= '9') {
-                    maybe_num *= 10;
-                    maybe_num += *it - '0';
-                    ++it;
-                }
-
-                if (*it == '$') {
-                    ++it;
-                    // Positional specifier, like %8$s
-                    if (maybe_num == 0) throw "Positional format specifier must have position of at least 1";
-                    count_pos = std::max(count_pos, maybe_num);
-                } else {
-                    // Non-positional specifier, like %s
-                    ++count_normal;
-                }
-            };
-
-            // Increase argument count and consume positional specifier, if present.
-            add_arg();
-
-            // Consume flags.
-            while (*it == '#' || *it == '0' || *it == '-' || *it == ' ' || *it == '+') ++it;
-
-            auto parse_size = [&] {
-                if (*it == '*') {
-                    ++it;
-                    add_arg();
-                } else {
-                    while ('0' <= *it && *it <= '9') ++it;
-                }
-            };
-
-            // Consume dynamic or static width value.
-            parse_size();
-
-            // Consume dynamic or static precision value.
-            if (*it == '.') {
-                ++it;
-                parse_size();
-            }
-
-            if (*it == '\0') throw "Format specifier incorrectly terminated by end of string";
-
-            // Length and type in "[flags][width][.precision][length]type"
-            // is not checked. Parsing continues with the next '%'.
-        }
-        if (count_normal && count_pos) throw "Format specifiers must be all positional or all non-positional!";
-        unsigned count{count_normal | count_pos};
-        if (num_params != count) throw "Format specifier count must match the argument count!";
-    }
+    consteval ConstevalFormatString(const char* str) : fmt{str} { detail::CheckNumFormatSpecifiers<num_params>(fmt); }
 };
 
 void ReplaceAll(std::string& in_out, const std::string& search, const std::string& substitute);
@@ -96,18 +100,30 @@ void ReplaceAll(std::string& in_out, const std::string& search, const std::strin
  *
  * If sep does not occur in sp, a singleton with the entirety of sp is returned.
  *
+ * @param[in] include_sep Whether to include the separator at the end of the left side of the splits.
+ *
  * Note that this function does not care about braces, so splitting
  * "foo(bar(1),2),3) on ',' will return {"foo(bar(1)", "2)", "3)"}.
+ *
+ * If include_sep == true, splitting "foo(bar(1),2),3) on ','
+ * will return:
+ *  - foo(bar(1),
+ *  - 2),
+ *  - 3)
  */
-template <typename T = Span<const char>>
-std::vector<T> Split(const Span<const char>& sp, std::string_view separators)
+template <typename T = std::span<const char>>
+std::vector<T> Split(const std::span<const char>& sp, std::string_view separators, bool include_sep = false)
 {
     std::vector<T> ret;
     auto it = sp.begin();
     auto start = it;
     while (it != sp.end()) {
         if (separators.find(*it) != std::string::npos) {
-            ret.emplace_back(start, it);
+            if (include_sep) {
+                ret.emplace_back(start, it + 1);
+            } else {
+                ret.emplace_back(start, it);
+            }
             start = it + 1;
         }
         ++it;
@@ -123,10 +139,10 @@ std::vector<T> Split(const Span<const char>& sp, std::string_view separators)
  * Note that this function does not care about braces, so splitting
  * "foo(bar(1),2),3) on ',' will return {"foo(bar(1)", "2)", "3)"}.
  */
-template <typename T = Span<const char>>
-std::vector<T> Split(const Span<const char>& sp, char sep)
+template <typename T = std::span<const char>>
+std::vector<T> Split(const std::span<const char>& sp, char sep, bool include_sep = false)
 {
-    return Split<T>(sp, std::string_view{&sep, 1});
+    return Split<T>(sp, std::string_view{&sep, 1}, include_sep);
 }
 
 [[nodiscard]] inline std::vector<std::string> SplitString(std::string_view str, char sep)
@@ -164,7 +180,7 @@ std::vector<T> Split(const Span<const char>& sp, char sep)
 
 [[nodiscard]] inline std::string_view RemovePrefixView(std::string_view str, std::string_view prefix)
 {
-    if (str.substr(0, prefix.size()) == prefix) {
+    if (str.starts_with(prefix)) {
         return str.substr(prefix.size());
     }
     return str;
