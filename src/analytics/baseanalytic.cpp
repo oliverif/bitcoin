@@ -14,13 +14,19 @@
 #include <node/database_args.h>
 #include <node/interface_ui.h>
 #include <tinyformat.h>
+#include <undo.h>
 #include <util/string.h>
 #include <util/thread.h>
 #include <util/translation.h>
 #include <validation.h> // For g_chainman
 
 
+#include <chrono>
+#include <memory>
+#include <optional>
+#include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 
 
@@ -61,7 +67,7 @@ bool BaseAnalytic::DB::ReadBestBlock(CBlockLocator& locator) const
     const char* sql = "SELECT locator FROM sync_points WHERE analytic_id = ?;";
     sqlite3_stmt* stmt;
     if (sqlite3_prepare_v2(storageConfig.sqlite_db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
-        std::cerr << "Failed to prepare statement: " << sqlite3_errmsg(storageConfig.sqlite_db) << std::endl;
+        LogError("%s: Failed to prepare statement: %s", __func__,sqlite3_errmsg(storageConfig.sqlite_db));
         return false;
     }
     sqlite3_bind_text(stmt, 1, storageConfig.analytic_id.c_str(), -1, SQLITE_TRANSIENT); // Use GetAnalyticId() directly
@@ -86,7 +92,7 @@ bool BaseAnalytic::DB::ReadBestBlock(CBlockLocator& locator) const
 
 
 
-void BaseAnalytic::DB::WriteBestBlock(const CBlockLocator& locator)
+void BaseAnalytic::DB::WriteBestBlock(const CBlockLocator& locator, uint64_t height)
 {
     // Serialize the CBlockLocator into a binary format
     DataStream oss;
@@ -95,16 +101,17 @@ void BaseAnalytic::DB::WriteBestBlock(const CBlockLocator& locator)
     
     std::string locator_blob = oss.str(); // Get the serialized data as a string
 
-    const char* sql = "INSERT OR REPLACE INTO sync_points (analytic_id, locator) VALUES (?, ?);";
+    const char* sql = "INSERT OR REPLACE INTO sync_points (analytic_id, locator, height) VALUES (?, ?, ?);";
     sqlite3_stmt* stmt;
     if (sqlite3_prepare_v2(storageConfig.sqlite_db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
-        std::cerr << "Failed to prepare statement: " << sqlite3_errmsg(storageConfig.sqlite_db) << std::endl;
+        LogError("%s: Failed to prepare statement: %s", __func__,sqlite3_errmsg(storageConfig.sqlite_db));
         return;
     }
     sqlite3_bind_text(stmt, 1, storageConfig.analytic_id.c_str(), -1, SQLITE_TRANSIENT); // Use GetAnalyticId() directly
     sqlite3_bind_blob(stmt, 2, locator_blob.data(), locator_blob.size(), SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 3, static_cast<sqlite3_int64>(height));
     if (sqlite3_step(stmt) != SQLITE_DONE) {
-        std::cerr << "Failed to execute statement: " << sqlite3_errmsg(storageConfig.sqlite_db) << std::endl;
+        LogError("%s: Failed to execute statement: %s", __func__,sqlite3_errmsg(storageConfig.sqlite_db));
         sqlite3_finalize(stmt);
         return;
     }
@@ -120,8 +127,7 @@ void BaseAnalytic::DB::WriteAnalyticsState(const std::vector<uint8_t>& state)
 
     sqlite3_stmt* stmt;
     if (sqlite3_prepare_v2(storageConfig.sqlite_db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
-        std::cerr << "Failed to prepare WriteAnalyticsState: "
-                  << sqlite3_errmsg(storageConfig.sqlite_db) << std::endl;
+        LogError("%s: Failed to prepare WriteAnalyticsState: %s",__func__,sqlite3_errmsg(storageConfig.sqlite_db));
         return;
     }
 
@@ -134,8 +140,7 @@ void BaseAnalytic::DB::WriteAnalyticsState(const std::vector<uint8_t>& state)
     sqlite3_bind_text(stmt, 2, storageConfig.analytic_id.c_str(), -1, SQLITE_TRANSIENT);
 
     if (sqlite3_step(stmt) != SQLITE_DONE) {
-        std::cerr << "Failed to execute WriteAnalyticsState: "
-                  << sqlite3_errmsg(storageConfig.sqlite_db) << std::endl;
+        LogError("%s: Failed to execute WriteAnalyticsState: %s",__func__,sqlite3_errmsg(storageConfig.sqlite_db));
     }
 
     sqlite3_finalize(stmt);
@@ -149,8 +154,7 @@ bool BaseAnalytic::DB::ReadAnalyticsState(std::vector<uint8_t>& out_state)
 
     sqlite3_stmt* stmt;
     if (sqlite3_prepare_v2(storageConfig.sqlite_db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
-        std::cerr << "Failed to prepare ReadAnalyticsState: "
-                  << sqlite3_errmsg(storageConfig.sqlite_db) << std::endl;
+        LogError("%s: Failed to prepare ReadAnalyticsState: %s",__func__,sqlite3_errmsg(storageConfig.sqlite_db));
         return false;
     }
 
@@ -191,6 +195,15 @@ bool BaseAnalytic::DB::ReadAnalytics(AnalyticsBatch& analytics, std::vector<Stor
         return false;
     }
 
+    StorageUtils::ColumnSpec target_name{"height", "INTEGER PRIMARY KEY"};
+    auto it = std::find_if(columns.begin(), columns.end(),
+                           [&target_name](const StorageUtils::ColumnSpec& col) {
+                               return (col.name == target_name.name) && (col.sqlite_type == target_name.sqlite_type);
+                           });
+
+    if (it == columns.end()) {
+        columns.insert(columns.begin(), {"height", "INTEGER PRIMARY KEY"});
+    }
     // Build the SQL query
     std::string sql = "SELECT ";
     bool first = true;
@@ -207,7 +220,8 @@ bool BaseAnalytic::DB::ReadAnalytics(AnalyticsBatch& analytics, std::vector<Stor
 
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(storageConfig.sqlite_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
-        throw std::runtime_error("Failed to prepare statement: " + std::string(sqlite3_errmsg(storageConfig.sqlite_db)));
+        LogError("%s: Failed to prepare statement: %s",__func__, std::string(sqlite3_errmsg(storageConfig.sqlite_db)));
+        return false;
     }
 
     // Bind height values
@@ -230,7 +244,66 @@ bool BaseAnalytic::DB::ReadAnalytics(AnalyticsBatch& analytics, std::vector<Stor
             } else if (type == SQLITE_NULL) {
                 values.second.emplace_back(int64_t(0)); // or std::nullopt if you support that
             } else {
-                throw std::runtime_error("Unsupported column type in analytics table");
+                LogError("%s: Unsupported column type in analytics table",__func__);
+                return false;
+            }
+        }
+
+        analytics.emplace_back(values);
+    }
+
+    sqlite3_finalize(stmt);
+    return true;
+}
+
+bool BaseAnalytic::DB::ReadAnalytics(AnalyticsBatch& analytics, std::vector<StorageUtils::ColumnSpec> columns, uint64_t from_height, uint64_t to_height) const
+{
+    StorageUtils::ColumnSpec target_name{"height", "INTEGER PRIMARY KEY"};
+    auto it = std::find_if(columns.begin(), columns.end(),
+                           [&target_name](const StorageUtils::ColumnSpec& col) {
+                               return (col.name == target_name.name) && (col.sqlite_type == target_name.sqlite_type);
+                           });
+
+    if (it == columns.end()) {
+        columns.insert(columns.begin(), {"height", "INTEGER PRIMARY KEY"});
+    }
+    // Build the SQL query
+    std::string sql = "SELECT ";
+    bool first = true;
+    for (const auto& col : columns) {
+        if (!first) sql += ", ";
+        sql += col.name;
+        first = false;
+    }
+    sql += " FROM " + storageConfig.table_name + " WHERE height BETWEEN ? AND ? ORDER BY height ASC;";
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(storageConfig.sqlite_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+        LogError("%s: Failed to prepare statement: %s", __func__, std::string(sqlite3_errmsg(storageConfig.sqlite_db)));
+        return false;
+    }
+
+    // Bind height values
+    sqlite3_bind_int64(stmt, static_cast<int>(1), static_cast<sqlite3_int64>(from_height));
+    sqlite3_bind_int64(stmt, static_cast<int>(2), static_cast<sqlite3_int64>(to_height));
+
+    // Execute and collect rows
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        AnalyticsRow values;
+        values.first = sqlite3_column_int64(stmt, 0);
+        std::vector<std::variant<int64_t, double>> row_values;
+
+        for (int col = 1; col < static_cast<int>(columns.size()); ++col) {
+            int type = sqlite3_column_type(stmt, col);
+            if (type == SQLITE_INTEGER) {
+                values.second.emplace_back(static_cast<int64_t>(sqlite3_column_int64(stmt, col)));
+            } else if (type == SQLITE_FLOAT) {
+                values.second.emplace_back(sqlite3_column_double(stmt, col));
+            } else if (type == SQLITE_NULL) {
+                values.second.emplace_back(int64_t(0)); // or std::nullopt if you support that
+            } else {
+                LogError("%s: Unsupported column type in analytics table", __func__);
+                return false;
             }
         }
 
@@ -252,7 +325,7 @@ bool BaseAnalytic::DB::WriteAnalytics(const AnalyticsBatch& analytics)
 {
     if (analytics.empty()) return true;
     // Construct the SQL statement
-    std::string sql = "INSERT OR REPLACE INTO " + storageConfig.table_name + " (";
+    std::string sql = "INSERT INTO " + storageConfig.table_name + " (";
     bool first = true;
     for (const auto& col : storageConfig.columns) {
         if (!first) sql += ", ";
@@ -264,7 +337,19 @@ bool BaseAnalytic::DB::WriteAnalytics(const AnalyticsBatch& analytics)
         if (i > 0) sql += ", ";
         sql += "?";
     }
-    sql += ");";
+    sql += ") ON CONFLICT(";
+
+    // If height exist must update instead of replacing
+    sql += storageConfig.columns[0].name;
+    sql += ") DO UPDATE SET ";
+
+    first = true;
+    for (size_t i = 1; i < storageConfig.columns.size(); ++i) {
+        if (!first) sql += ", ";
+        sql += storageConfig.columns[i].name + " = excluded." + storageConfig.columns[i].name;
+        first = false;
+    }
+    sql += ";";
 
     sqlite3_stmt* stmt;
     if (sqlite3_prepare_v2(storageConfig.sqlite_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
@@ -359,11 +444,6 @@ bool BaseAnalytic::Init()
     // callbacks are not missed once m_synced is true.
     m_chain->context()->validation_signals->RegisterValidationInterface(this);
 
-    /* CBlockLocator locator;
-    if (!GetDB().ReadBestBlock(locator)) {
-        uint256 start_block_hash = GetBlockHashByDate(m_chainstate->m_chain, start_timestamp);
-        locator = GetLocator(*m_chain,start_block_hash);
-    }*/
     CBlockLocator locator;
     if (!GetDB().ReadBestBlock(locator)) {
         locator.SetNull();
@@ -414,15 +494,48 @@ static const CBlockIndex* NextSyncBlock(const CBlockIndex* pindex_prev, CChain& 
     return chain.Next(chain.FindFork(pindex_prev));
 }
 
+bool BaseAnalytic::ProcessBlock(const CBlockIndex* pindex, const CBlock* block_data)
+{
+    interfaces::BlockInfo block_info = kernel::MakeBlockInfo(pindex, block_data);
+
+    CBlock block;
+    if (!block_data) { // disk lookup if block data wasn't provided
+        if (!m_chainstate->m_blockman.ReadBlock(block, *pindex)) {
+            FatalErrorf("Failed to read block %s from disk",
+                        pindex->GetBlockHash().ToString());
+            return false;
+        }
+        block_info.data = &block;
+    }
+
+    CBlockUndo block_undo;
+    if (CustomOptions().connect_undo_data) {
+        if (pindex->nHeight > 0 && !m_chainstate->m_blockman.ReadBlockUndo(block_undo, *pindex)) {
+            FatalErrorf("Failed to read undo block data %s from disk",
+                        pindex->GetBlockHash().ToString());
+            return false;
+        }
+        block_info.undo_data = &block_undo;
+    }
+
+    if (!CustomAppend(block_info)) {
+        FatalErrorf("Failed to write block %s to analytics database",
+                    pindex->nHeight);
+        return false;
+    }
+
+    return true;
+}
+
 void BaseAnalytic::Sync()
 {
     const CBlockIndex* pindex = m_best_block_index.load();
     if (!m_synced) {
-        std::chrono::steady_clock::time_point last_log_time{0s};
-        std::chrono::steady_clock::time_point last_locator_write_time{0s};
+        auto last_log_time{NodeClock::now()};
+        auto last_locator_write_time{last_log_time};
         while (true) {
             if (m_interrupt) {
-                LogPrintf("%s: m_interrupt set; exiting ThreadSync\n", GetName());
+                LogInfo("%s: m_interrupt set; exiting ThreadSync", GetName());
 
                 SetBestBlockIndex(pindex);
                 // No need to handle errors in Commit. If it fails, the error will be already be
@@ -453,35 +566,21 @@ void BaseAnalytic::Sync()
                 }
             }
             if (pindex_next->pprev != pindex && !Rewind(pindex, pindex_next->pprev)) {
-                FatalErrorf("%s: Failed to rewind index %s to a previous chain tip", __func__, GetName());
+                FatalErrorf("Failed to rewind %s to a previous chain tip", GetName());
                 return;
             }
             pindex = pindex_next;
 
 
-            CBlock block;
-            interfaces::BlockInfo block_info = kernel::MakeBlockInfo(pindex);
-            if (!m_chainstate->m_blockman.ReadBlock(block, *pindex)) {
-                FatalErrorf("%s: Failed to read block %s from disk",
-                           __func__, pindex->GetBlockHash().ToString());
-                return;
-            } else {
-                block_info.data = &block;
-            }
-            if (!CustomAppend(block_info)) {
-                FatalErrorf("%s: Failed to write block %s to analytics database",
-                           __func__, pindex->GetBlockHash().ToString());
-                return;
-            }
+            if (!ProcessBlock(pindex)) return; // error logged internally
 
-            auto current_time{std::chrono::steady_clock::now()};
-            if (last_log_time + SYNC_LOG_INTERVAL < current_time) {
-                LogPrintf("Syncing %s with block chain from height %d\n",
-                          GetName(), pindex->nHeight);
+            auto current_time{NodeClock::now()};
+            if (current_time - last_log_time >= SYNC_LOG_INTERVAL) {
+                LogInfo("Syncing %s with block chain from height %d", GetName(), pindex->nHeight);
                 last_log_time = current_time;
             }
 
-            if (last_locator_write_time + SYNC_LOCATOR_WRITE_INTERVAL < current_time) {
+            if (current_time - last_locator_write_time >= SYNC_LOCATOR_WRITE_INTERVAL) {
                 SetBestBlockIndex(pindex);
                 last_locator_write_time = current_time;
                 // No need to handle errors in Commit. See rationale above.
@@ -491,9 +590,9 @@ void BaseAnalytic::Sync()
     }
 
     if (pindex) {
-        LogPrintf("%s is enabled at height %d\n", BaseAnalytic::GetName(), pindex->nHeight);
+        LogInfo("%s is enabled at height %d", GetName(), pindex->nHeight);
     } else {
-        LogPrintf("%s is enabled\n", GetName());
+        LogInfo("%s is enabled", GetName());
     }
 }
 
@@ -505,12 +604,13 @@ bool BaseAnalytic::Commit()
     if (ok) {
         CBlockLocator prev_commited;
         if (!GetDB().ReadBestBlock(prev_commited)) {
-            return false;
+            prev_commited.SetNull();
         }
-        GetDB().WriteBestBlock(GetLocator(*m_chain, m_best_block_index.load()->GetBlockHash()));
+        GetDB().WriteBestBlock(GetLocator(*m_chain, m_best_block_index.load()->GetBlockHash()), m_best_block_index.load()->nHeight);
         if (!CustomCommit()) {
             //Rewind best block if CustomCommit fails
-            GetDB().WriteBestBlock(prev_commited);
+            const CBlockIndex* prev_locator_index{m_chainstate->m_blockman.LookupBlockIndex(prev_commited.vHave.at(0))};
+            GetDB().WriteBestBlock(prev_commited, prev_locator_index->nHeight);
             return false;
         }
     }
@@ -579,8 +679,8 @@ void BaseAnalytic::BlockConnected(ChainstateRole role, const std::shared_ptr<con
     const CBlockIndex* best_block_index = m_best_block_index.load();
     if (!best_block_index) {
         if (pindex->nHeight != 0) {
-            FatalErrorf("%s: First block connected is not the genesis block (height=%d)",
-                       __func__, pindex->nHeight);
+            FatalErrorf("First block connected is not the genesis block (height=%d)",
+                        pindex->nHeight);
             return;
         }
     } else {
@@ -590,29 +690,26 @@ void BaseAnalytic::BlockConnected(ChainstateRole role, const std::shared_ptr<con
         // in the ValidationInterface queue backlog even after the sync thread has caught up to the
         // new chain tip. In this unlikely event, log a warning and let the queue clear.
         if (best_block_index->GetAncestor(pindex->nHeight - 1) != pindex->pprev) {
-            LogPrintf("%s: WARNING: Block %s does not connect to an ancestor of "
-                      "known best chain (tip=%s); not updating index\n",
-                      __func__, pindex->GetBlockHash().ToString(),
-                      best_block_index->GetBlockHash().ToString());
+            LogWarning("Block %s does not connect to an ancestor of "
+                       "known best chain (tip=%s); not updating index",
+                       pindex->GetBlockHash().ToString(),
+                       best_block_index->GetBlockHash().ToString());
             return;
         }
         if (best_block_index != pindex->pprev && !Rewind(best_block_index, pindex->pprev)) {
-            FatalErrorf("%s: Failed to rewind index %s to a previous chain tip",
-                       __func__, GetName());
+            FatalErrorf("Failed to rewind %s to a previous chain tip",
+                        GetName());
             return;
         }
     }
-    interfaces::BlockInfo block_info = kernel::MakeBlockInfo(pindex, block.get());
-    if (CustomAppend(block_info)) {
+
+    // Dispatch block to child class; errors are logged internally and abort the node.
+    if (ProcessBlock(pindex, block.get())) {
         // Setting the best block index is intentionally the last step of this
         // function, so BlockUntilSyncedToCurrentChain callers waiting for the
         // best block index to be updated can rely on the block being fully
         // processed, and the index object being safe to delete.
         SetBestBlockIndex(pindex);
-    } else {
-        FatalErrorf("%s: Failed to write block %s to analytics",
-                   __func__, pindex->GetBlockHash().ToString());
-        return;
     }
 }
 

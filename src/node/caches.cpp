@@ -6,6 +6,7 @@
 
 #include <common/args.h>
 #include <index/txindex.h>
+#include <index/txtimestampindex.h>
 #include <kernel/caches.h>
 #include <logging.h>
 #include <util/byte_units.h>
@@ -21,6 +22,8 @@ static constexpr size_t MAX_TX_INDEX_CACHE{1024_MiB};
 static constexpr size_t MAX_FILTER_INDEX_CACHE{1024_MiB};
 //! Maximum dbcache size on 32-bit systems.
 static constexpr size_t MAX_32BIT_DBCACHE{1024_MiB};
+//! Max memory allocated to all tx timestamp index caches in bytes.
+static constexpr size_t MAX_TXTIMESTAMP_INDEX_CACHE{1024_MiB};
 
 namespace node {
 CacheSizes CalculateCacheSizes(const ArgsManager& args, size_t n_indexes)
@@ -37,6 +40,11 @@ CacheSizes CalculateCacheSizes(const ArgsManager& args, size_t n_indexes)
     IndexCacheSizes index_sizes;
     index_sizes.tx_index = std::min(total_cache / 8, args.GetBoolArg("-txindex", DEFAULT_TXINDEX) ? MAX_TX_INDEX_CACHE : 0);
     total_cache -= index_sizes.tx_index;
+
+    // Added index for timestamp here
+    index_sizes.txtimestamp_index = std::min(total_cache / 8, args.GetBoolArg("-txtimestampindex", DEFAULT_TXTIMESTAMPINDEX) ? MAX_TXTIMESTAMP_INDEX_CACHE : 0);
+    total_cache -= index_sizes.txtimestamp_index;
+
     if (n_indexes > 0) {
         size_t max_cache = std::min(total_cache / 8, MAX_FILTER_INDEX_CACHE);
         index_sizes.filter_index = max_cache / n_indexes;

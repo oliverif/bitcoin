@@ -13,7 +13,7 @@
 #include <util/threadinterrupt.h>
 #include <validationinterface.h>
 #include <sqlite3.h>
-#include <common/args.h>
+
 
 
 #include <string>
@@ -68,13 +68,15 @@ protected:
         bool ReadBestBlock(CBlockLocator& locator) const;
 
         /// Write block locator of the chain that the index is in sync with.
-        void WriteBestBlock(const CBlockLocator& locator);
+        void WriteBestBlock(const CBlockLocator& locator, uint64_t height);
 
         void WriteAnalyticsState(const std::vector<uint8_t>& state);
         bool ReadAnalyticsState(std::vector<uint8_t>& out_state);
 
         bool ReadAnalytics(AnalyticsRow& analytics, std::vector<StorageUtils::ColumnSpec> columns, uint64_t height) const;
         bool ReadAnalytics(AnalyticsBatch& analytics, std::vector<StorageUtils::ColumnSpec> columns, std::vector<uint64_t> heights) const;
+
+        bool ReadAnalytics(AnalyticsBatch& analytics, std::vector<StorageUtils::ColumnSpec> columns, uint64_t from_height, uint64_t to_height) const;
 
         bool WriteAnalytics(const AnalyticsRow& analytics);
         bool WriteAnalytics(const AnalyticsBatch& analytics);
@@ -114,6 +116,8 @@ private:
     /// Loop over disconnected blocks and call CustomRewind.
     bool Rewind(const CBlockIndex* current_tip, const CBlockIndex* new_tip);
 
+    bool ProcessBlock(const CBlockIndex* pindex, const CBlock* block_data = nullptr);
+
     virtual bool AllowPrune() const = 0;
 
     template <typename... Args>
@@ -132,7 +136,10 @@ protected:
 
     void ChainStateFlushed(ChainstateRole role, const CBlockLocator& locator) override;
 
-    /// Initialize internal state from the database and block index.
+     /// Return custom notification options for analytic.
+    [[nodiscard]] virtual interfaces::Chain::NotifyOptions CustomOptions() { return {}; }
+
+    /// Initialize internal state from the database and block analytic.
     [[nodiscard]] virtual bool CustomInit(const std::optional<interfaces::BlockRef>& block) { return true; }
 
     /// Write update analytics entries for a newly connected block.
@@ -141,9 +148,6 @@ protected:
     /// Virtual method called internally by Commit that can be overridden to atomically
     /// commit more index state.
     virtual bool CustomCommit() { return true; }
-
-    /// Return custom notification options for analytics.
-    [[nodiscard]] virtual interfaces::Chain::NotifyOptions CustomOptions() { return {}; }
 
     /// Rewind index by one block during a chain reorg.
     [[nodiscard]] virtual bool CustomRemove(const interfaces::BlockInfo& block) { return true; }

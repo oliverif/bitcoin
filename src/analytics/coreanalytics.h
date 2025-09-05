@@ -37,8 +37,8 @@ struct CoreAnalyticsRow {
     double mvrv_z;
     double realized_price;
     double rpv_ratio;
-    double utxos_in_loss;
-    double utxos_in_profit;
+    int64_t utxos_in_loss;
+    int64_t utxos_in_profit;
     double percent_utxos_in_profit;
     double percent_supply_in_profit;
     double total_supply_in_loss;
@@ -55,6 +55,18 @@ struct CoreAnalyticsRow {
     double ath;
     double dfath;
 };
+
+struct RunningStats {
+    int n = 0;
+    double mean = 0.0;
+    double M2 = 0.0; // Sum of squared diffs from the mean
+
+    void init_from_data(const std::vector<double>& data);
+    void add(double x);
+    void remove(const std::vector<double>& xs);
+    double variance() const;
+};
+
 struct TempVars {
     int64_t inputs = 0;
     double spendable_out = 0;
@@ -72,33 +84,42 @@ struct TempVars {
     double preveious_hodl_bank;
 };
 
+constexpr int64_t DOUBLE_FACTOR = 100000000;
+
 struct UtxoMapEntry {
     uint64_t timestamp;
     double price;
     int64_t utxo_count;
     double utxo_amount;
 
+    // Make double_to_int and int_to_double const so they can be called on const objects
+    int64_t double_to_int(double d) const { return static_cast<int64_t>(d * DOUBLE_FACTOR); }
+    double int_to_double(int64_t i) const { return static_cast<double>(i) / DOUBLE_FACTOR; }
+
     void Serialize(DataStream& ds) const
     {
-        ds << timestamp << price << utxo_count << utxo_amount;
+        ds << timestamp;
+        ds << double_to_int(price);
+        ds << utxo_count;
+        ds << double_to_int(utxo_amount);
     }
     void Deserialize(DataStream& ds)
     {
-        ds >> timestamp >> price >> utxo_count >> utxo_amount;
+        int64_t price_int;
+        int64_t utxo_amount_int;
+        ds >> timestamp;
+        ds >> price_int;
+        ds >> utxo_count;
+        ds >> utxo_amount_int;
+
+        price = int_to_double(price_int);
+        utxo_amount = int_to_double(utxo_amount_int);
     }
 };
+
 using UtxoMap = std::unordered_map<int64_t, UtxoMapEntry>;
 
-struct RunningStats {
-    int n = 0;
-    double mean = 0.0;
-    double M2 = 0.0; // Sum of squared diffs from the mean
 
-    void init_from_data(const std::vector<double>& data);
-    void add(double x);
-    void remove(const std::vector<double>& xs);
-    double variance() const;
-};
 
 
 class CoreAnalytics final : public BaseAnalytic
@@ -124,10 +145,8 @@ private:
     std::chrono::steady_clock::time_point point4;
 
     bool AllowPrune() const override { return false; }
-    std::unordered_map<int64_t, double> LoadBTCPrices(const std::string& file_path);
     bool UpdatePriceMap();
     bool ProcessTransactions(const interfaces::BlockInfo& block, const CBlockUndo& blockUndo);
-    bool PrepareStatistics(const interfaces::BlockInfo& block);
     bool GetIndexData(const interfaces::BlockInfo& block, const CBlockIndex& block_index);
     bool CalculateUtxoMetrics(const interfaces::BlockInfo& block);
     bool UpdateMeanVars(const interfaces::BlockInfo& block);
@@ -135,6 +154,7 @@ private:
     bool UpdateVocdMedian();
     void SerializeUtxoMap(const UtxoMap& map, DataStream& s);
     void DeserializeUtxoMap(UtxoMap& map, DataStream& s);
+    [[nodiscard]] bool ReverseBlock(const interfaces::BlockInfo& block);
 
 
 
@@ -142,11 +162,12 @@ protected:
     bool CustomAppend(const interfaces::BlockInfo& block) override;
     bool WaitForPrerequisite(std::chrono::seconds timeout);
     bool CustomCommit() override; //Needs to update utxo distribution map
-    bool CustomRewind(const interfaces::BlockRef& current_tip, const interfaces::BlockRef& new_tip) override; //TODO: implement rewind logic
+    bool CustomRemove(const interfaces::BlockInfo& block) override; // TODO: implement rewind logic
     BaseAnalytic::DB& GetDB() const override;
     bool CustomInit(const std::optional<interfaces::BlockRef>& block) override;
 
     bool LoadUtxoMap();
+    interfaces::Chain::NotifyOptions CustomOptions() override;
 
 public:
     explicit CoreAnalytics(std::unique_ptr<interfaces::Chain> chain, const fs::path& path);

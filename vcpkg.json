@@ -6,7 +6,9 @@
     "boost-multi-index",
     "boost-signals2",
     "libevent",
-    "arrow"
+    "arrow",
+    "curl",
+    "nlohmann-json"
   ],
   "default-features": [
     "qt",

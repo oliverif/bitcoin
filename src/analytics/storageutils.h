@@ -80,7 +80,9 @@ inline bool CreateTable(AnalyticStorageConfig& config)
 
     sql += R"(CREATE TABLE IF NOT EXISTS sync_points (
             analytic_id TEXT PRIMARY KEY,
-            locator BLOB
+            locator BLOB,
+            analytics_state BLOB,
+            height INTEGER
         );)";
 
     char* err_msg = nullptr;

@@ -16,6 +16,7 @@ class ArgsManager;
 class AddrMan;
 class BanMan;
 class BaseIndex;
+class BaseAnalytic;
 class CBlockPolicyEstimator;
 class CConnman;
 class ValidationSignals;
@@ -90,7 +91,7 @@ struct NodeContext {
     //! Manages all the node warnings
     std::unique_ptr<node::Warnings> warnings;
     std::thread background_init_thread;
-
+    std::vector<BaseAnalytic*> analytics;
     //! Declare default constructor and destructor that are not inline, so code
     //! instantiating the NodeContext struct doesn't need to #include class
     //! definitions for all the unique_ptr members.

@@ -9,6 +9,8 @@
 
 #include <kernel/checks.h>
 
+#include <analytics/ohlcvp.h>
+#include <analytics/coreanalytics.h>
 #include <addrman.h>
 #include <banman.h>
 #include <blockfilter.h>
@@ -533,6 +535,9 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
                  strprintf("Maintain an index of compact filters by block (default: %s, values: %s).", DEFAULT_BLOCKFILTERINDEX, ListBlockFilterTypes()) +
                  " If <type> is not supplied or if <type> = 1, indexes for all known types are enabled.",
                  ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+
+    argsman.AddArg("-ohlcvp", strprintf("Get and store ohlcvp for every block (default: %u)", DEFAULT_OHLCVP), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-coreanalytics", strprintf("Calculate a set of core analytics for every block (default: %u)", DEFAULT_COREANALYTICS), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
 
     argsman.AddArg("-addnode=<ip>", strprintf("Add a node to connect to and attempt to keep the connection open (see the addnode RPC help for more info). This option can be specified multiple times to add multiple nodes; connections are limited to %u at a time and are counted separately from the -maxconnections limit.", MAX_ADDNODE_CONNECTIONS), ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::CONNECTION);
     argsman.AddArg("-asmap=<file>", strprintf("Specify asn mapping used for bucketing of the peers (default: %s). Relative paths will be prefixed by the net-specific datadir location.", DEFAULT_ASMAP_FILENAME), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
@@ -1744,7 +1749,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         LogInfo("* Using %.1f MiB for transaction index database", index_cache_sizes.tx_index * (1.0 / 1024 / 1024));
     }
     if (args.GetBoolArg("-txtimestampindex", DEFAULT_TXTIMESTAMPINDEX)) {
-        LogPrintf("* Using %.1f MiB for transaction timestamp index database\n", cache_sizes.txtimestamp_index * (1.0 / 1024 / 1024));
+        LogPrintf("* Using %.1f MiB for transaction timestamp index database\n", index_cache_sizes.txtimestamp_index * (1.0 / 1024 / 1024));
     }
     for (BlockFilterType filter_type : g_enabled_filter_types) {
         LogInfo("* Using %.1f MiB for %s block filter index database",
@@ -1825,12 +1830,26 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     }
 
     if (args.GetBoolArg("-txtimestampindex", DEFAULT_TXTIMESTAMPINDEX)) {
-        g_txtimestampindex = std::make_unique<TxTimestampIndex>(interfaces::MakeChain(node), cache_sizes.txtimestamp_index, false, do_reindex);
+        g_txtimestampindex = std::make_unique<TxTimestampIndex>(interfaces::MakeChain(node), index_cache_sizes.txtimestamp_index, false, do_reindex);
         node.indexes.emplace_back(g_txtimestampindex.get());
     }
 
     // Init indexes
     for (auto index : node.indexes) if (!index->Init()) return false;
+
+
+    if (args.GetBoolArg("-ohlcvp", DEFAULT_OHLCVP) || args.GetBoolArg("-coreanalytics", DEFAULT_COREANALYTICS)) {
+        g_ohlcvp = std::make_unique<Ohlcvp>(interfaces::MakeChain(node), gArgs.GetDataDirNet() / "analytics\\analytics.db");
+        node.analytics.emplace_back(g_ohlcvp.get());
+    }
+    if (args.GetBoolArg("-coreanalytics", DEFAULT_COREANALYTICS)) {
+        g_coreanalytics = std::make_unique<CoreAnalytics>(interfaces::MakeChain(node), gArgs.GetDataDirNet() / "analytics\\analytics.db");
+        node.analytics.emplace_back(g_coreanalytics.get());
+    }
+
+    // Init analytics
+    for (auto analytic : node.analytics)
+        if (!analytic->Init()) return false;
 
     // ********************************************************* Step 9: load wallet
     for (const auto& client : node.chain_clients) {
@@ -1949,6 +1968,14 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             chainman.GetNotifications().fatalError(err_str);
             return;
         }
+
+        // Start analytics initial sync
+        if (!StartAnalyticsBackgroundSync(node)) {
+            bilingual_str err_str = _("Failed to start analytics, shutting down..");
+            chainman.GetNotifications().fatalError(err_str);
+            return;
+        }
+
         // Load mempool from disk
         if (auto* pool{chainman.ActiveChainstate().GetMempool()}) {
             LoadMempool(*pool, ShouldPersistMempool(args) ? MempoolPath(args) : fs::path{}, chainman.ActiveChainstate(), {});
@@ -2227,5 +2254,50 @@ bool StartIndexBackgroundSync(NodeContext& node)
 
     // Start threads
     for (auto index : node.indexes) if (!index->StartBackgroundSync()) return false;
+    return true;
+}
+
+bool StartAnalyticsBackgroundSync(NodeContext& node)
+{
+    // Find the oldest block among all indexes.
+    // This block is used to verify that we have the required blocks' data stored on disk,
+    // starting from that point up to the current tip.
+    // analytics_start_block='nullptr' means "start from height 0".
+    std::optional<const CBlockIndex*> analytics_start_block;
+    std::string older_analytic_name;
+    ChainstateManager& chainman = *Assert(node.chainman);
+    const Chainstate& chainstate = WITH_LOCK(::cs_main, return chainman.GetChainstateForIndexing());
+    const CChain& index_chain = chainstate.m_chain;
+
+    for (auto analytic : node.analytics) {
+        const AnalyticSummary& summary = analytic->GetSummary();
+        if (summary.synced) continue;
+
+        // Get the last common block between the index best block and the active chain
+        LOCK(::cs_main);
+        const CBlockIndex* pindex = chainman.m_blockman.LookupBlockIndex(summary.best_block_hash);
+        if (!index_chain.Contains(pindex)) {
+            pindex = index_chain.FindFork(pindex);
+        }
+
+        if (!analytics_start_block || !pindex || pindex->nHeight < analytics_start_block.value()->nHeight) {
+            analytics_start_block = pindex;
+            older_analytic_name = summary.name;
+            if (!pindex) break; // Starting from genesis so no need to look for earlier block.
+        }
+    };
+
+    // Verify all blocks needed to sync to current tip are present.
+    if (analytics_start_block) {
+        LOCK(::cs_main);
+        const CBlockIndex* start_block = *analytics_start_block;
+        if (!start_block) start_block = chainman.ActiveChain().Genesis();
+        if (!chainman.m_blockman.CheckBlockDataAvailability(*index_chain.Tip(), *Assert(start_block))) {
+            return InitError(Untranslated(strprintf("%s best block of the index goes beyond pruned data. Please disable the analytics or recalculate (which will download the whole blockchain again)", older_analytic_name)));
+        }
+    }
+    // Start analytics threads
+    for (auto analytic : node.analytics)
+        if (!analytic->StartBackgroundSync()) return false;
     return true;
 }

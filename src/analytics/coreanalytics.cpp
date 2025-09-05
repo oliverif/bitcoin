@@ -12,11 +12,6 @@
 #include <logging.h>
 #include <node/blockstorage.h>
 #include <validation.h>
-#include <arrow/table.h>
-#include <arrow/csv/api.h>
-#include <arrow/io/api.h>
-#include <arrow/array.h>
-#include <arrow/type.h>
 #include <undo.h>
 #include <univalue.h>
 #include <index/coinstatsindex.h>
@@ -27,6 +22,7 @@ std::unique_ptr<CoreAnalytics> g_coreanalytics;
 using kernel::CCoinsStats;
 
 
+double ZERO_THRESHOLD = 0.00000001;
 /** Access to the analytics database (analytics/) */
 class CoreAnalytics::DB : public BaseAnalytic::DB
 {
@@ -67,8 +63,8 @@ CoreAnalytics::DB::DB(const fs::path& path, std::string column_name) :
             {"mvrv_z","REAL"},
             {"realized_price","REAL"},
             {"rpv_ratio","REAL"},
-            {"utxos_in_loss","REAL"},
-            {"utxos_in_profit","REAL"},
+            {"utxos_in_loss","INTEGER"},
+            {"utxos_in_profit","INTEGER"},
             {"percent_utxos_in_profit","REAL"},
             {"percent_supply_in_profit","REAL"},
             {"total_supply_in_loss","REAL"},
@@ -87,7 +83,6 @@ CoreAnalytics::DB::DB(const fs::path& path, std::string column_name) :
     })
 {}
 
-//TODO: Implement custom rewind
 
 bool CoreAnalytics::DB::WriteCoreAnalytics(uint64_t height, const CoreAnalyticsRow& coreAnalyticsRow)
 {
@@ -146,7 +141,9 @@ CoreAnalytics::~CoreAnalytics() {
 bool CoreAnalytics::CustomInit(const std::optional<interfaces::BlockRef>& block){
     // init previous vars
     if(!block.has_value()){
-        return false;
+        m_temp_vars.previous_total_new_out = 0;
+        m_temp_vars.previous_total_coinbase_amount = 0;
+        return true;
     }
     //init genesis
     if(block.value().height == 0){
@@ -177,8 +174,8 @@ bool CoreAnalytics::CustomInit(const std::optional<interfaces::BlockRef>& block)
             prev_stats_heights.push_back(i);
         }
         AnalyticsBatch prev_stats;
-        if (!GetDB().ReadAnalytics(prev_stats, {{"mvrv", "REAL"}, {"miner_rev", "REAL"}}, prev_stats_heights)) {
-            LogError("s%: Couldn't read prev mvrv and miner_rev data from height s%", __func__, prev_stats_heights[0]);
+        if (!GetDB().ReadAnalytics(prev_stats, {{"mvrv", "REAL"}, {"miner_revenue", "REAL"}}, start_height_year, block.value().height)) {
+            LogError("%s: Couldn't read prev mvrv and miner_rev data from height %s", __func__, prev_stats_heights[0]);
             return false;
         }
         std::vector<double> mvrv_data;
@@ -196,20 +193,20 @@ bool CoreAnalytics::CustomInit(const std::optional<interfaces::BlockRef>& block)
         for (auto i = start_height_month; i < block.value().height; i++) {
             prev_vocd_heights.push_back(i);
         }
-        AnalyticsBatch prev_stats;
-        if (!GetDB().ReadAnalytics(prev_stats, {{"vocd", "REAL"}}, prev_vocd_heights)) {
-            LogError("s%: Couldn't read prev vocd from height s%", __func__, prev_vocd_heights[0]);
+        AnalyticsBatch prev_vocd;
+        if (!GetDB().ReadAnalytics(prev_vocd, {{"vocd", "REAL"}}, start_height_month, block.value().height)) {
+            LogError("%s: Couldn't read prev vocd from height %s", __func__, prev_vocd_heights[0]);
             return false;
         }
         std::vector<double> vocd_data;
-        for (auto row : prev_stats) {
+        for (auto row : prev_vocd) {
             vocd_data.push_back(std::get<double>(row.second[0]));
         }
         m_temp_vars.mvocd_running.init_from_data(vocd_data);
 
         AnalyticsRow prev_row;
         if (!GetDB().ReadAnalytics(prev_row, {{"ath", "REAL"}, {"hodl_bank", "REAL"}}, block.value().height)) {
-            LogError("s%: Couldn't read prev vocd from height s%", __func__, prev_vocd_heights[0]);
+            LogError("%s: Couldn't read prev vocd from height %s", __func__, prev_vocd_heights[0]);
             return false;
         }
         m_temp_vars.previous_ath = std::get<double>(prev_row.second[0]);
@@ -222,8 +219,8 @@ bool CoreAnalytics::LoadUtxoMap() {
     std::vector<uint8_t> blob;
     if (GetDB().ReadAnalyticsState(blob) && !blob.empty()) {
         try {
-            std::vector<const uint8_t> const_blob(blob.begin(), blob.end());
-            DataStream ds(const_blob);
+            //std::vector<const uint8_t> const_blob(blob.begin(), blob.end());
+            DataStream ds(std::span<const uint8_t>(blob.data(), blob.size()));
             DeserializeUtxoMap(m_utxo_map, ds);
         } catch (const std::exception& e) {
             LogError("%s: Failed to deserialize UTXO map: %s\n", __func__, e.what());
@@ -240,15 +237,11 @@ bool CoreAnalytics::CustomAppend(const interfaces::BlockInfo& block)
 {
     assert(block.data);
     if (prerequisite_height <= m_current_height) {
-        if (!WaitForPrerequisite()) {
+        if (!WaitForPrerequisite(std::chrono::seconds(60))) {
             return false;
         }
     }
-    CBlockUndo block_undo;
-    const CBlockIndex* pindex = WITH_LOCK(cs_main, return m_chainstate->m_blockman.LookupBlockIndex(block.hash));
-    if (!m_chainstate->m_blockman.ReadBlockUndo(block_undo, *pindex)) {
-        return false;
-    }
+    
     m_current_height = block.height;
     m_row.issuance = ValueFromAmount(GetBlockSubsidy(m_current_height, Params().GetConsensus())).get_real();
 
@@ -267,6 +260,11 @@ bool CoreAnalytics::CustomAppend(const interfaces::BlockInfo& block)
         m_temp_vars.mvrv_stats.add(0);
         m_temp_vars.miner_rev_stats.add(0);
     } else {
+        CBlockUndo block_undo;
+        const CBlockIndex* pindex = WITH_LOCK(cs_main, return m_chainstate->m_blockman.LookupBlockIndex(block.hash));
+        if (!m_chainstate->m_blockman.ReadBlockUndo(block_undo, *pindex)) {
+            return false;
+        }
         // Skip this when genesis but keep metrics as 0 and write. Or we default some to 1
         if (!ProcessTransactions(block, block_undo)) {
             return false;
@@ -274,16 +272,17 @@ bool CoreAnalytics::CustomAppend(const interfaces::BlockInfo& block)
         if (!GetIndexData(block, *pindex)) {
             return false;
         }
-        if (!CalculateUtxoMetrics(block)) {
-            return false;
-        }
         m_row.mc = m_row.cs * m_current_price;
-        m_utxo_map[block.height].utxo_count = m_temp_vars.delta_ntransaction_outputs + m_temp_vars.inputs;
-        m_utxo_map[block.height].utxo_amount = m_temp_vars.spendable_out;
         m_row.rc = m_row.rc + m_temp_vars.spendable_out * m_current_price - m_temp_vars.previous_utxo_value;
         m_row.mvrv = m_row.mc / m_row.rc;
         m_row.realized_price = m_row.rc / m_row.cs;
         m_row.rpv_ratio = m_row.rp / m_row.rc;
+
+        m_utxo_map[block.height].utxo_count = m_temp_vars.delta_ntransaction_outputs + m_temp_vars.inputs;
+        m_utxo_map[block.height].utxo_amount = m_temp_vars.spendable_out;
+        if (!CalculateUtxoMetrics(block)) {
+            return false;
+        }
 
         if (!UpdateMeanVars(block)) {
             return false;
@@ -298,7 +297,8 @@ bool CoreAnalytics::CustomAppend(const interfaces::BlockInfo& block)
             return false;
         }
         m_row.hodl_bank = m_temp_vars.preveious_hodl_bank * m_current_price - m_row.mvocd;
-        m_row.reserve_risk = m_current_price / m_row.hodl_bank;
+
+        m_row.reserve_risk = std::fabs(m_row.hodl_bank) > ZERO_THRESHOLD ? m_current_price / m_row.hodl_bank : 1.0;
     }
 
     if (!m_db->WriteCoreAnalytics(m_current_height,m_row)) {
@@ -307,6 +307,15 @@ bool CoreAnalytics::CustomAppend(const interfaces::BlockInfo& block)
     }
 
     return true;
+}
+
+interfaces::Chain::NotifyOptions CoreAnalytics::CustomOptions()
+{
+    interfaces::Chain::NotifyOptions options;
+    options.connect_undo_data = true;
+    options.disconnect_data = true;
+    options.disconnect_undo_data = true;
+    return options;
 }
 
 bool CoreAnalytics::WaitForPrerequisite(std::chrono::seconds timeout = std::chrono::seconds(60))
@@ -338,7 +347,53 @@ bool CoreAnalytics::CustomCommit()
     return true;
 }
 
+bool CoreAnalytics::CustomRemove(const interfaces::BlockInfo& block)
+{
+    if (!ReverseBlock(block)) {
+        return false; // failure cause logged internally
+    }
+    // Rewind internal state to previous block
+    if (!CustomInit(std::make_optional(interfaces::BlockRef{*block.prev_hash, block.height - 1}))) {
+        LogError("%s: Couldn't re-init to prev block %s", __func__, block.height - 1);
+        return false;
+    }
+    return true;
+}
 
+bool CoreAnalytics::ReverseBlock(const interfaces::BlockInfo& block)
+{
+    for (const CTransactionRef& tx : block.data->vtx) {
+        // We do not need to consider unspendables here, as we're only processing inputs, which are spend output and thereby implicitly spendable outputs.
+        if (tx->IsCoinBase()) {
+            continue; // Skip coinbase transactions as they don't have any inputs to consider. We only consider inputs in this function.
+        }
+        const CTxUndo* undoTX{nullptr};
+        auto it = std::find_if(block.data->vtx.begin(), block.data->vtx.end(), [tx](CTransactionRef t) { return *t == *tx; });
+        if (it != block.data->vtx.end()) {
+            // -1 as blockundo does not have coinbase tx
+            undoTX = &block.undo_data->vtxundo.at(it - block.data->vtx.begin() - 1);
+        }
+        for (unsigned int i = 0; i < tx->vin.size(); i++) {
+            const CTxIn& txin = tx->vin[i];
+            const Coin& prev_coin = undoTX->vprevout[i];
+            const CTxOut& prev_txout = prev_coin.out;
+            double btc_amount = ValueFromAmount(prev_txout.nValue).get_real();
+
+            auto it = m_utxo_map.find(prev_coin.nHeight);
+            if (it != m_utxo_map.end()) {
+                LogError("%s: Price not available for block with height %s", __func__, prev_coin.nHeight);
+                return false;
+            }
+            auto& utxo_entry = it->second;
+
+            // Add back the btc amount and count to the utxo entry that was previously moved
+            // when the input was processed in CustomAppend before reorg.
+            utxo_entry.utxo_amount += btc_amount;
+            ++utxo_entry.utxo_count;
+        }
+    }
+    return true;
+}
 
 BaseAnalytic::DB& CoreAnalytics::GetDB() const { return *m_db; }
 
@@ -380,7 +435,7 @@ bool CoreAnalytics::UpdatePriceMap()
             return false;
         }
         UtxoMapEntry new_entry{
-            .timestamp = std::get<double>(new_row.second[0]),
+            .timestamp = static_cast<uint64_t>(std::get<int64_t>(new_row.second[0])),
             .price = std::get<double>(new_row.second[1]),
             .utxo_count = 0,
             .utxo_amount = 0};
@@ -404,27 +459,21 @@ bool CoreAnalytics::ProcessTransactions(const interfaces::BlockInfo& block, cons
     double previous_adjusted_utxo_value = 0;
     double new_adjusted_utxo_amount = 0;
 
-    for (const CTransactionRef& tx : block.data->vtx) {
+    for (size_t i = 0; i < block.data->vtx.size(); ++i) {
+        const auto& tx{block.data->vtx.at(i)};
         //We do not need to consider unspendables here, as we're only processing inputs, which are spend output and thereby implicitly spendable outputs.
         if (tx->IsCoinBase()) {
             continue; // Skip coinbase transactions as they don't have any inputs to consider. We only consider inputs in this function.
         }
         m_temp_vars.inputs += tx->vin.size();
-        const CTxUndo* undoTX{ nullptr };
-        auto it = std::find_if(block.data->vtx.begin(), block.data->vtx.end(), [tx](CTransactionRef t) { return *t == *tx; });
-        if (it != block.data->vtx.end()) {
-            // -1 as blockundo does not have coinbase tx
-            undoTX = &blockUndo.vtxundo.at(it - block.data->vtx.begin() - 1);
-        }
+        const auto& tx_undo{Assert(block.undo_data)->vtxundo.at(i - 1)};
         // Calculate total input value for the transaction
-        for (unsigned int i = 0; i < tx->vin.size(); i++) {
-            const CTxIn& txin = tx->vin[i];
-            const Coin& prev_coin = undoTX->vprevout[i];
-            const CTxOut& prev_txout = prev_coin.out;
-            double btc_amount = ValueFromAmount(prev_txout.nValue).get_real();
+        for (unsigned int j = 0; j < tx->vin.size(); j++) {
+            Coin prev_coin{tx_undo.vprevout[j]};
+            double btc_amount = ValueFromAmount(prev_coin.out.nValue).get_real();
 
             auto it = m_utxo_map.find(prev_coin.nHeight);
-            if (it != m_utxo_map.end()){
+            if (it == m_utxo_map.end()){
                 LogError("%s: Price not available for block with height %s", __func__, prev_coin.nHeight);
                 return false;
             }
@@ -451,8 +500,8 @@ bool CoreAnalytics::ProcessTransactions(const interfaces::BlockInfo& block, cons
     }
 
     m_row.nrpl = m_row.rp - m_row.rl;
-    m_row.rplr = m_row.rp / m_row.rl;
-    m_row.asopr = new_adjusted_utxo_amount * m_current_price / previous_adjusted_utxo_value;
+    m_row.rplr = std::fabs(m_row.rl) > ZERO_THRESHOLD ? m_row.rp / m_row.rl : 1.0;
+    m_row.asopr = std::fabs(previous_adjusted_utxo_value) > ZERO_THRESHOLD ? new_adjusted_utxo_amount * m_current_price / previous_adjusted_utxo_value : 1.0;
 
     return true;
 }
@@ -479,7 +528,7 @@ bool CoreAnalytics::GetIndexData(const interfaces::BlockInfo& block, const CBloc
     m_row.transaction_fees = m_temp_vars.coinbase_amount - m_row.issuance;
 
     if (!coin_stats.total_amount.has_value()) {
-        LogError("s%: Total amount does not have value for height s%", __func__, m_current_height);
+        LogError("%s: Total amount does not have value for height %s", __func__, m_current_height);
     }
     m_row.cs = ValueFromAmount(coin_stats.total_amount.value()).get_real();
 
@@ -494,23 +543,26 @@ bool CoreAnalytics::CalculateUtxoMetrics(const interfaces::BlockInfo& block)
     m_row.utxos_in_profit = 0;
     m_row.total_supply_in_loss = 0;
     m_row.total_supply_in_profit = 0;
+    int64_t rest = 0;
 
     for (const auto& entry : m_utxo_map) {
 
-        if (entry.second.utxo_amount == 0) {
-            continue;
-        }
-        if (entry.second.price < m_current_price) {
+        if (entry.second.utxo_amount == 0) [[likely]] continue;
+
+        if (entry.second.price > m_current_price) {
             m_row.utxos_in_loss += entry.second.utxo_count;
             m_row.total_supply_in_loss += entry.second.utxo_amount;
             m_row.ul += entry.second.utxo_amount * entry.second.price;
-        } else if (entry.second.price > m_current_price) {
+        } else if (entry.second.price < m_current_price) {
             m_row.utxos_in_profit += entry.second.utxo_count;
             m_row.total_supply_in_profit += entry.second.utxo_amount;
             m_row.up += entry.second.utxo_amount * entry.second.price;
+        } else {
+            rest += entry.second.utxo_count;
         }
     }
-
+    m_row.percent_supply_in_profit = m_row.total_supply_in_profit / m_row.cs;
+    m_row.percent_utxos_in_profit = static_cast<double>(m_row.utxos_in_profit) / (m_row.utxos_in_profit + m_row.utxos_in_loss + rest);
     return true;
 }
 
@@ -524,8 +576,8 @@ bool CoreAnalytics::UpdateMeanVars(const interfaces::BlockInfo& block)
     }
     if (heights_to_remove.size() > 0) {
         AnalyticsBatch rows_to_remove;
-        if (!GetDB().ReadAnalytics(rows_to_remove, {{"mvrv", "REAL"}, {"miner_rev", "REAL"}}, heights_to_remove)) {
-            LogError("s%: Couldn't read prev mvrv and miner_rev data from height s%", __func__, heights_to_remove[0]);
+        if (!GetDB().ReadAnalytics(rows_to_remove, {{"mvrv", "REAL"}, {"miner_revenue", "REAL"}}, heights_to_remove)) {
+            LogError("%s: Couldn't read prev mvrv and miner_rev data from height %s", __func__, heights_to_remove[0]);
             return false;
         }
         std::vector<double> mvrv_to_remove;
@@ -547,57 +599,37 @@ bool CoreAnalytics::UpdateMeanVars(const interfaces::BlockInfo& block)
 }
 
 uint64_t CoreAnalytics::GetHeightAfterTimestamp(uint64_t timestamp, uint64_t height)
-{   
-    if (height < 52560) {
-        // Cannot go below zero or underflow
-        return 0; // Or handle as needed
-    }
+{
+    if (height < 52560) return 0;
 
-    uint64_t start = height - 52560;
-    int iteration_direction = 1;
+    uint64_t left = height > 52560 ? height - 52560 : 0;
+    uint64_t right = height;
+    uint64_t result = 0;
 
-    // Defensive: check if start exists in map
-    if (m_utxo_map.find(start) == m_utxo_map.end()) {
-        // Handle missing start key as you want
-        return 0;
-    }
+    // Binary search for the first height with timestamp > target
+    while (left <= right) {
+        uint64_t mid = left + (right - left) / 2;
 
-    if (m_utxo_map[start].timestamp > timestamp) {
-        iteration_direction = -1;
-    } else {
-        iteration_direction = 1;
-    }
-
-    uint64_t h = start;
-
-    // Search upwards
-    if (iteration_direction == 1) {
-        while (h <= height) {
-            auto it = m_utxo_map.find(h);
-            if (it == m_utxo_map.end()) break; // no data here, stop or handle
-
-            if (it->second.timestamp > timestamp) {
-                return h;
+        auto it = m_utxo_map.find(mid);
+        if (it == m_utxo_map.end()) {
+            // Handle missing data - could search nearby or return error
+            if (mid > 0) {
+                right = mid - 1;
+                continue;
+            } else {
+                break;
             }
-            h++;
         }
-    }
-    // Search downwards
-    else {
-        while (h > 0) {
-            auto it = m_utxo_map.find(h);
-            if (it == m_utxo_map.end()) break; // no data here, stop or handle
 
-            if (it->second.timestamp <= timestamp) {
-                return h + 1; // next height is just after timestamp
-            }
-            if (h == 0) break;
-            h--;
+        if (it->second.timestamp > timestamp) {
+            result = mid;
+            right = mid - 1; // Look for earlier height
+        } else {
+            left = mid + 1; // Look for later height
         }
     }
 
-    // If not found, return 0 or some sentinel
-    return 0;
+    return result;
 }
 
 bool CoreAnalytics::UpdateVocdMedian()
@@ -611,7 +643,7 @@ bool CoreAnalytics::UpdateVocdMedian()
     if (heights_to_remove.size() > 0) {
         AnalyticsBatch rows_to_remove;
         if (!GetDB().ReadAnalytics(rows_to_remove, {{"vocd", "REAL"}}, heights_to_remove)) {
-            LogError("s%: Couldn't read prev mvrv and miner_rev data from height s%", __func__, heights_to_remove[0]);
+            LogError("%s: Couldn't read prev mvrv and miner_rev data from height %s", __func__, heights_to_remove[0]);
             return false;
         }
         for (auto row : rows_to_remove) {
@@ -620,7 +652,7 @@ bool CoreAnalytics::UpdateVocdMedian()
     }
     m_temp_vars.mvocd_running.insert(m_row.vocd);
     m_row.mvocd = m_temp_vars.mvocd_running.median();
-    return false;
+    return true;
 }
 
 void RunningStats::init_from_data(const std::vector<double>& data)

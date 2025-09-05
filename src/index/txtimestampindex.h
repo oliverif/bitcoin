@@ -14,6 +14,13 @@ static constexpr bool DEFAULT_TXTIMESTAMPINDEX{false};
  * The index is written to a LevelDB database and records the filesystem
  * location of each transaction by transaction hash.
  */
+struct uint256Hasher {
+    std::size_t operator()(const uint256& key) const
+    {
+        return std::hash<std::string>{}(key.ToString()); // Convert to string or another hashable type
+    }
+};
+
 class TxTimestampIndex final : public BaseIndex
 {
 protected:
@@ -42,6 +49,7 @@ public:
     /// @param[out]  timestamp  The transaction itself.
     /// @return  true if transaction is found, false otherwise
     bool GetTxTimestamp(const uint256& tx_hash, uint64_t& timestamp) const;
+    bool GetTxTimestamps(const std::vector<uint256>& txids, std::unordered_map<uint256, uint64_t, uint256Hasher>& timestamps) const;
 };
 
 /// The global transaction index, used in GetTransaction. May be null.
