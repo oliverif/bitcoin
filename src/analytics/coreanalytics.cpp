@@ -79,7 +79,8 @@ CoreAnalytics::DB::DB(const fs::path& path, std::string column_name) :
             {"hodl_bank","REAL"},
             {"reserve_risk","REAL"},
             {"ath","REAL"},
-            {"dfat", "REAL"}}
+            {"dfat", "REAL"}
+        }
     })
 {}
 
@@ -120,7 +121,8 @@ bool CoreAnalytics::DB::WriteCoreAnalytics(uint64_t height, const CoreAnalyticsR
         coreAnalyticsRow.hodl_bank,
         coreAnalyticsRow.reserve_risk,
         coreAnalyticsRow.ath,
-        coreAnalyticsRow.dfath};
+        coreAnalyticsRow.dfath
+    };
     AnalyticsRow row = {height, vals };
     return WriteAnalytics(row);
 }
@@ -278,8 +280,8 @@ bool CoreAnalytics::CustomAppend(const interfaces::BlockInfo& block)
         m_row.realized_price = m_row.rc / m_row.cs;
         m_row.rpv_ratio = m_row.rp / m_row.rc;
 
-        m_utxo_map[block.height].utxo_count = m_temp_vars.delta_ntransaction_outputs + m_temp_vars.inputs;
-        m_utxo_map[block.height].utxo_amount = m_temp_vars.spendable_out;
+        m_utxo_map[block.height].utxo_count += m_temp_vars.delta_ntransaction_outputs + m_temp_vars.inputs;
+        m_utxo_map[block.height].utxo_amount += m_temp_vars.spendable_out;
         if (!CalculateUtxoMetrics(block)) {
             return false;
         }
@@ -362,22 +364,15 @@ bool CoreAnalytics::CustomRemove(const interfaces::BlockInfo& block)
 
 bool CoreAnalytics::ReverseBlock(const interfaces::BlockInfo& block)
 {
-    for (const CTransactionRef& tx : block.data->vtx) {
-        // We do not need to consider unspendables here, as we're only processing inputs, which are spend output and thereby implicitly spendable outputs.
+    for (size_t i = 0; i < block.data->vtx.size(); ++i) {
+        const auto& tx{block.data->vtx.at(i)};
         if (tx->IsCoinBase()) {
             continue; // Skip coinbase transactions as they don't have any inputs to consider. We only consider inputs in this function.
         }
-        const CTxUndo* undoTX{nullptr};
-        auto it = std::find_if(block.data->vtx.begin(), block.data->vtx.end(), [tx](CTransactionRef t) { return *t == *tx; });
-        if (it != block.data->vtx.end()) {
-            // -1 as blockundo does not have coinbase tx
-            undoTX = &block.undo_data->vtxundo.at(it - block.data->vtx.begin() - 1);
-        }
-        for (unsigned int i = 0; i < tx->vin.size(); i++) {
-            const CTxIn& txin = tx->vin[i];
-            const Coin& prev_coin = undoTX->vprevout[i];
-            const CTxOut& prev_txout = prev_coin.out;
-            double btc_amount = ValueFromAmount(prev_txout.nValue).get_real();
+        const auto& tx_undo{Assert(block.undo_data)->vtxundo.at(i - 1)};
+        for (unsigned int j = 0; j < tx->vin.size(); j++) {
+            Coin prev_coin{tx_undo.vprevout[j]};
+            double btc_amount = ValueFromAmount(prev_coin.out.nValue).get_real();
 
             auto it = m_utxo_map.find(prev_coin.nHeight);
             if (it != m_utxo_map.end()) {
@@ -494,8 +489,7 @@ bool CoreAnalytics::ProcessTransactions(const interfaces::BlockInfo& block, cons
             }
 
             utxo_entry.utxo_amount -= btc_amount;
-            --utxo_entry.utxo_count;
-           
+            --utxo_entry.utxo_count;          
         }
     }
 
@@ -532,6 +526,7 @@ bool CoreAnalytics::GetIndexData(const interfaces::BlockInfo& block, const CBloc
     }
     m_row.cs = ValueFromAmount(coin_stats.total_amount.value()).get_real();
 
+
     return true;
 }
 
@@ -548,7 +543,14 @@ bool CoreAnalytics::CalculateUtxoMetrics(const interfaces::BlockInfo& block)
     for (const auto& entry : m_utxo_map) {
 
         if (entry.second.utxo_amount == 0) [[likely]] continue;
-
+        /* if (entry.second.utxo_amount == 0 && entry.second.utxo_count != 0) {
+            LogError("%s: UTXO amount 0, but count is %s", __func__, entry.second.utxo_count);
+            return false;
+        }
+        if (entry.second.utxo_count == 0 && std::fabs(entry.second.utxo_amount) > ZERO_THRESHOLD) {
+            LogError("%s: UTXO count 0, but amount is %s", __func__, entry.second.utxo_amount);
+            return false;
+        }*/
         if (entry.second.price > m_current_price) {
             m_row.utxos_in_loss += entry.second.utxo_count;
             m_row.total_supply_in_loss += entry.second.utxo_amount;
